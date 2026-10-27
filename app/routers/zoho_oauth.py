@@ -44,11 +44,13 @@ def _get_accounts_url(region: str) -> str:
     return f"https://accounts.zoho.{reg}"
 
 
-def _get_mail_api_url(region: str, api_domain: str = "") -> str:
-    """Return Zoho Mail API base URL for the given region or returned api_domain."""
-    if api_domain:
-        return api_domain.rstrip("/")
+def _get_mail_api_url(region: str) -> str:
+    """Return Zoho Mail API base URL for the given region."""
     reg = (region or "com").strip().lower()
+    if reg in ("com.au", "au"):
+        return "https://mail.zoho.com.au"
+    if reg == "ca":
+        return "https://mail.zohocloud.ca"
     return f"https://mail.zoho.{reg}"
 
 
@@ -272,7 +274,7 @@ async def zoho_callback(
     token_expiry = datetime.utcnow() + timedelta(seconds=expires_in)
 
     # Fetch user account details from Zoho Mail API
-    user_email, zoho_account_id = _get_user_account_info(access_token, region, api_domain)
+    user_email, zoho_account_id = _get_user_account_info(access_token, region)
     if not user_email:
         raise HTTPException(502, "Failed to retrieve primary email address from Zoho Mail API")
 
@@ -440,26 +442,61 @@ def _exchange_code(
     return last_res
 
 
-def _get_user_account_info(access_token: str, region: str, api_domain: str = "") -> tuple[str | None, str | None]:
+def _get_user_account_info(access_token: str, region: str = "com") -> tuple[str | None, str | None]:
     """Fetch user primary email and accountId from Zoho Mail /api/accounts endpoint."""
-    mail_url = _get_mail_api_url(region, api_domain)
-    req = urllib.request.Request(
-        f"{mail_url}/api/accounts",
-        headers={"Authorization": f"Zoho-oauthtoken {access_token}"},
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=20) as resp:
-            payload = json.loads(resp.read().decode())
-            data = payload.get("data", [])
-            if isinstance(data, list) and len(data) > 0:
-                first = data[0]
-                email = first.get("primaryEmailAddress") or first.get("incomingUserName")
-                acc_id = str(first.get("accountId") or "")
-                return email, acc_id
-            return None, None
-    except Exception as e:
-        log.error("Zoho Mail /api/accounts error: %s", e)
-        return None, None
+    reg = (region or "com").strip().lower()
+    candidate_regions = [reg]
+    for r in ["com", "eu", "in", "com.au", "jp"]:
+        if r not in candidate_regions:
+            candidate_regions.append(r)
+
+    # 1. Try Zoho Mail /api/accounts across candidate regions
+    for r in candidate_regions:
+        mail_url = _get_mail_api_url(r)
+        url = f"{mail_url}/api/accounts"
+        for auth_hdr in [f"Zoho-oauthtoken {access_token}", f"Bearer {access_token}"]:
+            req = urllib.request.Request(
+                url,
+                headers={"Authorization": auth_hdr, "Accept": "application/json"},
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=15) as resp:
+                    payload = json.loads(resp.read().decode())
+                    data = payload.get("data", [])
+                    if isinstance(data, list) and len(data) > 0:
+                        first = data[0]
+                        email = (
+                            first.get("primaryEmailAddress")
+                            or first.get("incomingUserName")
+                            or first.get("mailboxAddress")
+                            or first.get("accountName")
+                        )
+                        acc_id = str(first.get("accountId") or "")
+                        if email:
+                            return email, acc_id
+            except Exception as e:
+                log.warning("Zoho Mail %s check error: %s", url, e)
+                continue
+
+    # 2. Fallback to Zoho Accounts userinfo endpoint
+    for r in candidate_regions:
+        acc_domain = _get_accounts_url(r)
+        for auth_hdr in [f"Zoho-oauthtoken {access_token}", f"Bearer {access_token}"]:
+            try:
+                req = urllib.request.Request(
+                    f"{acc_domain}/oauth/user/info",
+                    headers={"Authorization": auth_hdr, "Accept": "application/json"},
+                )
+                with urllib.request.urlopen(req, timeout=15) as resp:
+                    uinfo = json.loads(resp.read().decode())
+                    email = uinfo.get("Email") or uinfo.get("email")
+                    zuid = str(uinfo.get("ZUID") or uinfo.get("zuid") or "")
+                    if email:
+                        return email, zuid
+            except Exception:
+                continue
+
+    return None, None
 
 
 def refresh_access_token(

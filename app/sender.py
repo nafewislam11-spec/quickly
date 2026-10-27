@@ -1285,9 +1285,15 @@ def _send_via_zoho(
         return None
 
     region = zoho_region or zoho_account.region or settings.zoho_region or "com"
+    from app.routers.zoho_oauth import _get_mail_api_url, _get_user_account_info
     account_id = zoho_account.zoho_account_id
-    api_domain = zoho_account.api_domain or f"https://mail.zoho.{region}"
-    send_url = f"{api_domain.rstrip('/')}/api/accounts/{account_id}/messages"
+    if not account_id:
+        _, account_id = _get_user_account_info(access_token, region)
+        if account_id:
+            zoho_account.zoho_account_id = account_id
+
+    mail_base = _get_mail_api_url(region)
+    send_url = f"{mail_base}/api/accounts/{account_id}/messages"
 
     payload: dict[str, Any] = {
         "fromAddress": from_email,
