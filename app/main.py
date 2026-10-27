@@ -298,7 +298,7 @@ async def health_check():
 
 
 @app.get("/api/status")
-async def api_status(request: Request, user=Depends(_auth_dep)):
+async def api_status(request: Request):
     """Schedule and send-job status so you can verify the worker is running."""
     import os
     schedule = getattr(request.app.state, "schedule", None)
