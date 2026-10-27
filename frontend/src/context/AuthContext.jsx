@@ -83,6 +83,42 @@ export function AuthProvider({ children }) {
     setUser(null);
   }, []);
 
+  const loginWithPassword = useCallback(async (username, password) => {
+    const res = await fetch('/api/auth/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({ username, password }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ detail: 'Invalid credentials' }));
+      throw new Error(err.detail || 'Invalid credentials');
+    }
+    const data = await res.json();
+    _accessToken = data.access_token;
+    const userRes = await fetch('/api/auth/me', {
+      headers: { Authorization: `Bearer ${data.access_token}` },
+    });
+    if (userRes.ok) {
+      setUser(await userRes.json());
+    }
+    return true;
+  }, []);
+
+  const registerAdmin = useCallback(async (username, email, password) => {
+    const res = await fetch('/api/auth/register', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username, email, password }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ detail: 'Registration failed' }));
+      throw new Error(err.detail || 'Registration failed');
+    }
+    setSetupComplete(true);
+    return await loginWithPassword(username, password);
+  }, [loginWithPassword]);
+
   const checkSetup = useCallback(async () => {
     try {
       const res = await fetch('/api/auth/setup-status');
@@ -120,6 +156,8 @@ export function AuthProvider({ children }) {
       logout,
       refreshToken,
       checkSetup,
+      loginWithPassword,
+      registerAdmin,
     }}>
       {children}
     </AuthContext.Provider>

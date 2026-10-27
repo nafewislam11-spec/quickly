@@ -18,7 +18,13 @@ function parseDetailMessage(text) {
 }
 
 export default function Login() {
-  const { setupComplete } = useAuth();
+  const { setupComplete, loginWithPassword, registerAdmin } = useAuth();
+  const [username, setUsername] = useState('');
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [authError, setAuthError] = useState('');
+  const [authBusy, setAuthBusy] = useState(false);
+
   const [restoreExpanded, setRestoreExpanded] = useState(false);
   const [restoreFile, setRestoreFile] = useState(null);
   const [restoreFileKey, setRestoreFileKey] = useState(0);
@@ -31,6 +37,23 @@ export default function Login() {
   const [restoreMsg, setRestoreMsg] = useState(null);
 
   const isFirstUser = setupComplete === false;
+
+  const handleAuthSubmit = async (e) => {
+    e.preventDefault();
+    setAuthError('');
+    setAuthBusy(true);
+    try {
+      if (isFirstUser) {
+        await registerAdmin(username, email, password);
+      } else {
+        await loginWithPassword(username, password);
+      }
+    } catch (err) {
+      setAuthError(err.message || 'Authentication failed');
+    } finally {
+      setAuthBusy(false);
+    }
+  };
 
   useEffect(() => {
     if (!isFirstUser || !restoreExpanded || !restoreFile) {
@@ -107,7 +130,76 @@ export default function Login() {
           </h2>
         </div>
 
-        <div className="mt-8 space-y-4">
+        <form onSubmit={handleAuthSubmit} className="mt-8 space-y-4">
+          {authError && (
+            <div className="p-3 text-xs text-red-700 bg-red-50 border border-red-200 rounded-lg">
+              {authError}
+            </div>
+          )}
+
+          <div>
+            <label className="block text-xs font-semibold text-gray-700 mb-1">
+              Username
+            </label>
+            <input
+              type="text"
+              required
+              value={username}
+              onChange={e => setUsername(e.target.value)}
+              placeholder="admin"
+              className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white text-gray-900"
+            />
+          </div>
+
+          {isFirstUser && (
+            <div>
+              <label className="block text-xs font-semibold text-gray-700 mb-1">
+                Admin Email
+              </label>
+              <input
+                type="email"
+                required
+                value={email}
+                onChange={e => setEmail(e.target.value)}
+                placeholder="admin@example.com"
+                className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white text-gray-900"
+              />
+            </div>
+          )}
+
+          <div>
+            <label className="block text-xs font-semibold text-gray-700 mb-1">
+              Password {isFirstUser && <span className="text-gray-400 font-normal">(min 8 chars, 1 uppercase, 1 lowercase, 1 number)</span>}
+            </label>
+            <input
+              type="password"
+              required
+              value={password}
+              onChange={e => setPassword(e.target.value)}
+              placeholder="••••••••"
+              className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white text-gray-900"
+            />
+          </div>
+
+          <button
+            type="submit"
+            disabled={authBusy}
+            className="w-full py-2.5 px-4 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-semibold shadow focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50 transition-colors"
+          >
+            {authBusy ? 'Please wait...' : isFirstUser ? 'Create Admin Account & Enter' : 'Sign In'}
+          </button>
+        </form>
+
+        <div className="relative my-6">
+          <div className="absolute inset-0 flex items-center">
+            <div className="w-full border-t border-gray-200"></div>
+          </div>
+          <div className="relative flex justify-center text-xs uppercase">
+            <span className="bg-gray-50 px-2 text-gray-400">Or continue with OAuth</span>
+          </div>
+        </div>
+
+        <div className="space-y-3">
           <a
             href="/oauth/app/google/authorize"
             className="w-full flex items-center justify-center gap-3 py-2.5 px-4 border border-gray-300 rounded-lg shadow-sm text-sm font-medium text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500"
