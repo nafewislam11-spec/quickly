@@ -44,20 +44,20 @@ _TYPOGRAPHY = (
 # (``margin:0;padding:0`` on paragraphs etc.), so one Enter = one line and a
 # blank line stays a single blank line instead of a full paragraph gap.
 _BLOCK_STYLES: dict[str, str] = {
-    "p": "margin:0;padding:0;",
-    "h1": "font-size:2em;font-weight:bold;line-height:1.25;margin:0;padding:0;",
-    "h2": "font-size:1.5em;font-weight:bold;line-height:1.25;margin:0;padding:0;",
-    "h3": "font-size:1.17em;font-weight:bold;line-height:1.25;margin:0;padding:0;",
-    "h4": "font-weight:bold;margin:0;padding:0;",
-    "h5": "font-weight:bold;margin:0;padding:0;",
-    "h6": "font-weight:bold;margin:0;padding:0;",
-    "ul": "margin:0;padding-left:24px;list-style-type:disc;",
-    "ol": "margin:0;padding-left:24px;list-style-type:decimal;",
-    "li": "margin:0;padding:0;",
-    "blockquote": "border-left:4px solid #cccccc;margin:5px 0;padding-left:16px;",
+    "p": "margin:0 0 16px 0;padding:0;line-height:1.6;",
+    "h1": "font-size:2em;font-weight:bold;line-height:1.25;margin:0 0 16px 0;padding:0;",
+    "h2": "font-size:1.5em;font-weight:bold;line-height:1.25;margin:0 0 16px 0;padding:0;",
+    "h3": "font-size:1.17em;font-weight:bold;line-height:1.25;margin:0 0 16px 0;padding:0;",
+    "h4": "font-weight:bold;margin:0 0 16px 0;padding:0;",
+    "h5": "font-weight:bold;margin:0 0 16px 0;padding:0;",
+    "h6": "font-weight:bold;margin:0 0 16px 0;padding:0;",
+    "ul": "margin:0 0 16px 0;padding-left:24px;list-style-type:disc;",
+    "ol": "margin:0 0 16px 0;padding-left:24px;list-style-type:decimal;",
+    "li": "margin:0 0 6px 0;padding:0;",
+    "blockquote": "border-left:4px solid #cccccc;margin:5px 0 16px 0;padding-left:16px;",
     "pre": (
         "background-color:#f0f0f0;border-radius:3px;white-space:pre-wrap;"
-        "margin:5px 0;padding:5px 10px;font-family:monospace;"
+        "margin:5px 0 16px 0;padding:5px 10px;font-family:monospace;"
     ),
     "code": "font-family:monospace;font-size:85%;",
     "a": "color:#1155cc;text-decoration:underline;",
@@ -94,6 +94,7 @@ _STYLE_ATTR_RE = re.compile(
 # end-of-string at every position.  Attribute values with ``>``/``<`` inside
 # quotes still match a neighbouring real tag, which is all this probe needs.
 _HTML_TAG_RE = re.compile(r"<[a-zA-Z][^<>]*>")
+_HTML_BLOCK_RE = re.compile(r"<(p|div|table|h[1-6]|ul|ol|blockquote)\b", re.IGNORECASE)
 _FULL_DOCUMENT_RE = re.compile(r"<html\b", re.IGNORECASE)
 
 
@@ -127,10 +128,6 @@ def normalize_email_html(html: str | None) -> str:
     if not html:
         return html or ""
 
-    # Plain text (no tags at all) has nothing to normalise.
-    if not _HTML_TAG_RE.search(html):
-        return html
-
     # Idempotent: never wrap/normalise the same body twice.
     if NORMALIZED_MARKER in html:
         return html
@@ -140,6 +137,26 @@ def normalize_email_html(html: str | None) -> str:
     # the fragment.  The editor never produces full documents, so leave them be.
     if _FULL_DOCUMENT_RE.search(html):
         return html
+
+    # Convert markdown links [text](url) -> <a href="url">text</a>
+    html = re.sub(
+        r'\[([^\]]+)\]\((https?://[^\s\)]+)\)',
+        r'<a href="\2">\1</a>',
+        html,
+    )
+
+    # If the text has no HTML block tags (<p>, <div>, etc.),
+    # it is plain text with newlines (\n\n or \n). Convert to <p> tags with proper spacing!
+    if not _HTML_BLOCK_RE.search(html):
+        paragraphs = re.split(r'\n\s*\n', html.strip())
+        p_blocks = []
+        for p in paragraphs:
+            p_clean = p.strip()
+            if not p_clean:
+                continue
+            p_html = p_clean.replace('\n', '<br>')
+            p_blocks.append(f'<p>{p_html}</p>')
+        html = "".join(p_blocks)
 
     body = _TAG_RE.sub(_style_tag, html)
     return f'<div {NORMALIZED_MARKER} style="{_TYPOGRAPHY}">{body}</div>'
