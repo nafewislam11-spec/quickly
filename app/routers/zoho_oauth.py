@@ -53,8 +53,16 @@ def _get_mail_api_url(region: str, api_domain: str = "") -> str:
 
 
 @router.get("/api/zoho/status")
-async def zoho_oauth_status(db: AsyncSession = Depends(get_db)):
+async def zoho_oauth_status(request: Request, db: AsyncSession = Depends(get_db)):
     """Check if Zoho Mail OAuth credentials are configured."""
+    proto = request.headers.get("x-forwarded-proto", request.url.scheme)
+    host = request.headers.get("host", request.url.netloc)
+    if host and ("localhost" in settings.base_url or not settings.base_url):
+        settings.base_url = f"{proto}://{host}".rstrip("/")
+        from app.settings_manager import save_setting_to_db
+        await save_setting_to_db(db, "base_url", settings.base_url)
+        await db.commit()
+
     from app.app_settings import get_zoho_oauth_credentials
     client_id, client_secret, region = await get_zoho_oauth_credentials(db)
     configured = bool(client_id and client_secret)
@@ -122,6 +130,7 @@ async def list_zoho_accounts(
 
 @router.get("/oauth/zoho/authorize")
 async def zoho_authorize(
+    request: Request,
     display_name: str = "",
     max_per_day: int = 50,
     ramp_up_enabled: bool = False,
@@ -131,6 +140,14 @@ async def zoho_authorize(
     _user=Depends(get_current_user),
 ):
     """Redirect user to Zoho consent screen."""
+    proto = request.headers.get("x-forwarded-proto", request.url.scheme)
+    host = request.headers.get("host", request.url.netloc)
+    if host and ("localhost" in settings.base_url or not settings.base_url):
+        settings.base_url = f"{proto}://{host}".rstrip("/")
+        from app.settings_manager import save_setting_to_db
+        await save_setting_to_db(db, "base_url", settings.base_url)
+        await db.commit()
+
     from app.app_settings import get_zoho_oauth_credentials
     client_id, client_secret, region = await get_zoho_oauth_credentials(db)
     if not client_id or not client_secret:
@@ -240,7 +257,10 @@ async def zoho_callback(
     client_id, client_secret, region = await get_zoho_oauth_credentials(db)
 
     # Exchange code for tokens
-    token_data = _exchange_code(code, client_id, client_secret, region)
+    proto = request.headers.get("x-forwarded-proto", request.url.scheme)
+    host = request.headers.get("host", request.url.netloc)
+    req_redirect = f"{proto}://{host}/oauth/zoho/callback" if host else ""
+    token_data = _exchange_code(code, client_id, client_secret, region, redirect_uri=req_redirect)
     if not token_data or "access_token" not in token_data:
         err_msg = token_data.get("error", "Unknown token exchange failure") if token_data else "Failed to contact Zoho"
         raise HTTPException(502, f"Failed to exchange authorization code for tokens: {err_msg}")
@@ -327,7 +347,7 @@ async def zoho_callback(
     await db.commit()
     log.info("Zoho Mail OAuth connected: %s (inbox_id=%s, account_id=%s)", user_email, inbox.id, zoho_account_id)
 
-    base = settings.base_url.rstrip("/")
+    base = f"{proto}://{host}".rstrip("/") if host else settings.base_url.rstrip("/")
     if source == "connect_url":
         from app.auth import SECRET_KEY
         sig = hmac.new(SECRET_KEY.encode(), user_email.encode(), "sha256").hexdigest()[:12]
@@ -365,39 +385,59 @@ async def disconnect_zoho(
 
 # ---- Helper functions ----
 
-def _exchange_code(code: str, client_id: str, client_secret: str, region: str) -> dict | None:
+def _exchange_code(
+    code: str,
+    client_id: str,
+    client_secret: str,
+    region: str,
+    redirect_uri: str = "",
+) -> dict | None:
     """Exchange authorization code for access/refresh tokens via Zoho token endpoint."""
     accounts_url = _get_accounts_url(region)
     token_url = f"{accounts_url}/oauth/v2/token"
 
-    data = urllib.parse.urlencode({
-        "client_id": client_id,
-        "client_secret": client_secret,
-        "code": code,
-        "redirect_uri": settings.zoho_redirect_uri,
-        "grant_type": "authorization_code",
-    }).encode()
+    candidates = []
+    if redirect_uri:
+        candidates.append(redirect_uri)
+    if settings.zoho_redirect_uri and settings.zoho_redirect_uri not in candidates:
+        candidates.append(settings.zoho_redirect_uri)
+    fallback_local = "http://localhost:8000/oauth/zoho/callback"
+    if fallback_local not in candidates:
+        candidates.append(fallback_local)
 
-    req = urllib.request.Request(
-        token_url,
-        data=data,
-        headers={"Content-Type": "application/x-www-form-urlencoded"},
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            return json.loads(resp.read().decode())
-    except urllib.error.HTTPError as e:
-        body = ""
+    last_res = None
+    for uri in candidates:
+        data = urllib.parse.urlencode({
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "code": code,
+            "redirect_uri": uri,
+            "grant_type": "authorization_code",
+        }).encode()
+
+        req = urllib.request.Request(
+            token_url,
+            data=data,
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            method="POST",
+        )
         try:
-            body = e.read().decode()
-        except Exception:
-            pass
-        log.error("Zoho token exchange HTTP %s: %s", e.code, body)
-        return None
-    except Exception as e:
-        log.error("Zoho token exchange error: %s", e)
-        return None
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                res = json.loads(resp.read().decode())
+                if res and "access_token" in res:
+                    return res
+                last_res = res
+        except urllib.error.HTTPError as e:
+            try:
+                body = e.read().decode()
+                last_res = json.loads(body)
+            except Exception:
+                pass
+            continue
+        except Exception as e:
+            log.error("Zoho token exchange error with %s: %s", uri, e)
+            continue
+    return last_res
 
 
 def _get_user_account_info(access_token: str, region: str, api_domain: str = "") -> tuple[str | None, str | None]:
