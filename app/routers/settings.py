@@ -893,6 +893,10 @@ class _FilterKnownIPsUpdate(_BaseModel):
     enabled: bool
 
 
+class _FilterBotOpensUpdate(_BaseModel):
+    enabled: bool
+
+
 @router.get("/filter-known-ips")
 async def get_filter_known_ips(db: AsyncSession = Depends(get_db)):
     from app.app_settings import get_setting
@@ -905,6 +909,22 @@ async def get_filter_known_ips(db: AsyncSession = Depends(get_db)):
 async def set_filter_known_ips(payload: _FilterKnownIPsUpdate, db: AsyncSession = Depends(get_db)):
     from app.app_settings import put_setting
     await put_setting(db, "filter_known_ips", "true" if payload.enabled else "false")
+    await db.commit()
+    return {"ok": True, "enabled": payload.enabled}
+
+
+@router.get("/filter-bot-opens")
+async def get_filter_bot_opens(db: AsyncSession = Depends(get_db)):
+    from app.app_settings import get_setting
+    val = await get_setting(db, "filter_bot_opens")
+    enabled = True if val is None else val.strip().lower() in ("true", "1", "yes", "on")
+    return {"enabled": enabled}
+
+
+@router.post("/filter-bot-opens")
+async def set_filter_bot_opens(payload: _FilterBotOpensUpdate, db: AsyncSession = Depends(get_db)):
+    from app.app_settings import put_setting
+    await put_setting(db, "filter_bot_opens", "true" if payload.enabled else "false")
     await db.commit()
     return {"ok": True, "enabled": payload.enabled}
 

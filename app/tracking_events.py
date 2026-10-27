@@ -108,7 +108,56 @@ async def resolve_email_log_for_open(db: AsyncSession, token: str) -> EmailLog |
     return email_log
 
 
-async def record_email_open(db: AsyncSession, token: str, ip: str | None) -> bool:
+def is_bot_user_agent(ua: str | None) -> bool:
+    """Detect Apple Mail Privacy Protection (MPP) proxy or automated security bots."""
+    if not ua:
+        return False
+    ua_clean = ua.strip()
+    ua_lower = ua_clean.lower()
+    # Apple Mail Privacy Protection (MPP) signature: exact "Mozilla/5.0"
+    if ua_clean in ("Mozilla/5.0", "Mozilla/5.0 ()", "Mozilla/4.0") or ua_lower == "mozilla/5.0":
+        return True
+    bot_keywords = (
+        "bot", "spider", "crawl", "scan", "barracuda", "proofpoint",
+        "mimecast", "trend micro", "sophos", "fireeye", "symantec",
+        "postman", "curl", "python-requests", "aiohttp", "urllib",
+        "wget", "headless", "phantomjs", "virus", "mailscanner",
+        "applebot", "safebrowsing"
+    )
+    return any(kw in ua_lower for kw in bot_keywords)
+
+
+def is_apple_or_scanner_ip(ip: str | None) -> bool:
+    """Detect Apple Inc. ASN IP ranges (17.0.0.0/8) used by Apple Mail proxy cache."""
+    if not ip:
+        return False
+    import ipaddress
+    try:
+        addr = ipaddress.ip_address(ip)
+        if addr in ipaddress.ip_network("17.0.0.0/8"):
+            return True
+    except ValueError:
+        pass
+    return False
+
+
+def is_immediate_prefetch(sent_at: datetime | None, min_seconds: int = 10) -> bool:
+    """Detect instant pre-fetch opens that occur faster than humanly possible."""
+    if not sent_at:
+        return False
+    now = time_provider.utcnow()
+    s = sent_at.replace(tzinfo=None) if sent_at.tzinfo else sent_at
+    n = now.replace(tzinfo=None) if now.tzinfo else now
+    elapsed = (n - s).total_seconds()
+    return 0 <= elapsed < min_seconds
+
+
+async def record_email_open(
+    db: AsyncSession,
+    token: str,
+    ip: str | None,
+    user_agent: str | None = None,
+) -> bool:
     """Persist open event if applicable. Returns True if an open was recorded."""
     email_log = await resolve_email_log_for_open(db, token)
     if not email_log:
@@ -116,6 +165,23 @@ async def record_email_open(db: AsyncSession, token: str, ip: str | None) -> boo
     if await is_known_ip(db, ip):
         log.debug("open: skipping known IP %s for log_id=%s", ip, email_log.id)
         return False
+
+    from app.settings_manager import settings
+    if not getattr(settings, "test_mode", False):
+        from app.app_settings import get_setting
+        filter_bot_opens = await get_setting(db, "filter_bot_opens")
+        # Enabled by default
+        if filter_bot_opens is None or filter_bot_opens.strip().lower() in ("true", "1", "yes", "on"):
+            if is_bot_user_agent(user_agent):
+                log.info("open: ignoring bot User-Agent %r for log_id=%s", user_agent, email_log.id)
+                return False
+            if is_apple_or_scanner_ip(ip):
+                log.info("open: ignoring Apple MPP / scanner IP %s for log_id=%s", ip, email_log.id)
+                return False
+            if user_agent is not None and is_immediate_prefetch(email_log.sent_at, min_seconds=10):
+                log.info("open: ignoring immediate pre-fetch (<10s) for log_id=%s", email_log.id)
+                return False
+
     if not email_log.opened:
         email_log.opened = True
     db.add(

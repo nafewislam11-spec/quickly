@@ -54,7 +54,8 @@ async def open_pixel(
     we fall back to an integer lookup when the token doesn't match.
     """
     ip = client_ip_from_request(request)
-    await record_email_open(db, token, ip)
+    user_agent = request.headers.get("user-agent", "")
+    await record_email_open(db, token, ip, user_agent=user_agent)
     return Response(
         content=PIXEL_GIF,
         media_type="image/gif",

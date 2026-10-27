@@ -301,6 +301,7 @@ export default function Settings() {
   const [currentIp, setCurrentIp] = useState('');
   const [newIpAddress, setNewIpAddress] = useState('');
   const [filterKnownIps, setFilterKnownIps] = useState(true);
+  const [filterBotOpens, setFilterBotOpens] = useState(true);
 
   // Zoho Mail OAuth
   const [zohoSettings, setZohoSettings] = useState({ client_id: '', client_secret: '', region: 'com', configured: false, redirect_uri: '' });
@@ -313,7 +314,7 @@ export default function Settings() {
   /* ── load data ── */
   const loadAll = useCallback(async () => {
     try {
-      const [stratData, tmData, whList, evtData, aiData, provData, ipData, keysData, notifData, gmailSyncData, mcpData, telData, noticesData] = await Promise.all([
+      const [stratData, tmData, whList, evtData, aiData, provData, ipData, keysData, notifData, gmailSyncData, mcpData, telData, noticesData, botOpensData] = await Promise.all([
         api.get('/settings/scheduling-strategy'),
         api.get('/settings/test-mode'),
         api.get('/settings/webhooks'),
@@ -327,6 +328,7 @@ export default function Settings() {
         api.get('/settings/mcp-setup').catch(() => null),
         api.get('/settings/telemetry').catch(() => null),
         api.get('/notices').catch(() => null),
+        api.get('/settings/filter-bot-opens').catch(() => null),
       ]);
       setStrategy(stratData.scheduling_strategy || 'priority');
       setTestMode(tmData.test_mode || false);
@@ -347,6 +349,7 @@ export default function Settings() {
       setKnownIps(ipData.known_ips || []);
       setCurrentIp(ipData.current_ip || '');
       setFilterKnownIps(ipData.filter_enabled !== false);
+      if (botOpensData) setFilterBotOpens(botOpensData.enabled !== false);
       setApiKeys(keysData || []);
       if (notifData) {
         setNotifConfig(notifData);
@@ -1021,6 +1024,30 @@ export default function Settings() {
               }
             </p>
           </div>
+
+          <div className="mb-4 pt-3 border-t border-gray-100 dark:border-gray-800">
+            <label className="flex items-center gap-2 cursor-pointer text-sm font-medium">
+              <input
+                type="checkbox"
+                checked={filterBotOpens}
+                onChange={async (e) => {
+                  const val = e.target.checked;
+                  setFilterBotOpens(val);
+                  try {
+                    await api.post('/settings/filter-bot-opens', { enabled: val });
+                    notify(val ? 'Apple MPP & Bot open filtering enabled' : 'Bot open filtering disabled', 'success');
+                  } catch (err) {
+                    notify(err.message, 'error');
+                  }
+                }}
+              />
+              <span>Filter Apple Mail Privacy Protection (MPP) & automated bot opens</span>
+            </label>
+            <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+              Ignores fake pre-fetch opens from Apple Mail proxy servers (17.0.0.0/8), generic scanner User-Agents (e.g. Mozilla/5.0), and instant pre-fetch opens within 10 seconds of delivery.
+            </p>
+          </div>
+
           <Button size="sm" variant="outline" onClick={() => setKnownIpsOpen(true)}>
             Manage Known IPs
           </Button>
