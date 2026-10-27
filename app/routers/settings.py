@@ -901,7 +901,7 @@ class _FilterBotOpensUpdate(_BaseModel):
 async def get_filter_known_ips(db: AsyncSession = Depends(get_db)):
     from app.app_settings import get_setting
     val = await get_setting(db, "filter_known_ips")
-    enabled = True if val is None else val.strip().lower() in ("true", "1", "yes", "on")
+    enabled = False if val is None else val.strip().lower() in ("true", "1", "yes", "on")
     return {"enabled": enabled}
 
 
@@ -938,7 +938,7 @@ async def list_known_ips(
     from app import time as _time
     from app.app_settings import get_setting
     val = await get_setting(db, "filter_known_ips")
-    filter_enabled = True if val is None else val.strip().lower() in ("true", "1", "yes", "on")
+    filter_enabled = False if val is None else val.strip().lower() in ("true", "1", "yes", "on")
 
     now = _time.utcnow()
     result = await db.execute(select(KnownIP).order_by(KnownIP.last_seen_at.desc()))

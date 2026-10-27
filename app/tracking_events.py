@@ -82,7 +82,8 @@ async def is_known_ip(db: AsyncSession, ip: str | None) -> bool:
 
     from app.app_settings import get_setting
     filter_enabled = await get_setting(db, "filter_known_ips")
-    if filter_enabled is not None and filter_enabled.strip().lower() in ("false", "0", "no", "off"):
+    # Only filter admin IPs if explicitly enabled by user (default is False so testing clicks works)
+    if filter_enabled is None or filter_enabled.strip().lower() not in ("true", "1", "yes", "on"):
         return False
 
     now = time_provider.utcnow()
@@ -229,6 +230,9 @@ async def record_email_click(db: AsyncSession, token: str, ip: str | None) -> bo
         return False
     if not email_log.clicked:
         email_log.clicked = True
+    if not email_log.opened:
+        email_log.opened = True
+    log.info("click: recorded click for email_log_id=%s token=%s ip=%s", email_log.id, token, ip)
     db.add(
         EmailClick(
             email_log_id=tracked.email_log_id,

@@ -300,7 +300,7 @@ export default function Settings() {
   const [knownIpsOpen, setKnownIpsOpen] = useState(false);
   const [currentIp, setCurrentIp] = useState('');
   const [newIpAddress, setNewIpAddress] = useState('');
-  const [filterKnownIps, setFilterKnownIps] = useState(true);
+  const [filterKnownIps, setFilterKnownIps] = useState(false);
   const [filterBotOpens, setFilterBotOpens] = useState(true);
 
   // Zoho Mail OAuth
@@ -348,7 +348,7 @@ export default function Settings() {
       setAiProviders(provData.providers || []);
       setKnownIps(ipData.known_ips || []);
       setCurrentIp(ipData.current_ip || '');
-      setFilterKnownIps(ipData.filter_enabled !== false);
+      setFilterKnownIps(ipData.filter_enabled === true);
       if (botOpensData) setFilterBotOpens(botOpensData.enabled !== false);
       setApiKeys(keysData || []);
       if (notifData) {

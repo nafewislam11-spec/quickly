@@ -1556,6 +1556,7 @@ function CampaignAnalyticsTab({ campaignId, campaign, sentData = [], sequences =
               sentData={sentData}
               filter={sentFilter}
               onFilterChange={setSentFilter}
+              onRefresh={loadAll}
             />
           )}
         </div>
@@ -1694,7 +1695,7 @@ const SENT_FILTER_OPTIONS = [
   { value: 'unsubscribed', label: 'Unsubscribed' },
 ];
 
-function SentEmailsPanel({ sentData = [], filter, onFilterChange }) {
+function SentEmailsPanel({ sentData = [], filter, onFilterChange, onRefresh }) {
   const filtered = useMemo(() => {
     switch (filter) {
       case 'opened':      return sentData.filter(e => e.opened);
@@ -1733,6 +1734,15 @@ function SentEmailsPanel({ sentData = [], filter, onFilterChange }) {
           </button>
         ))}
         <span className="text-xs text-gray-400 ml-2">{filtered.length} email{filtered.length !== 1 ? 's' : ''}</span>
+        {onRefresh && (
+          <button
+            onClick={onRefresh}
+            className="ml-auto px-2.5 py-1 text-xs font-medium rounded border border-gray-300 dark:border-gray-600 hover:bg-gray-100 dark:hover:bg-gray-700 text-gray-700 dark:text-gray-200 flex items-center gap-1 transition-colors"
+            title="Refresh sent email stats"
+          >
+            ↻ Refresh
+          </button>
+        )}
       </div>
 
       {filtered.length === 0 ? (
@@ -1764,13 +1774,38 @@ function SentEmailsPanel({ sentData = [], filter, onFilterChange }) {
                   <td className="px-3 py-2 text-xs text-gray-700 max-w-[200px] truncate">{e.subject || '—'}</td>
                   <td className="px-3 py-2 text-center">
                     {e.opened
-                      ? <span className="text-amber-600 font-bold text-xs">✓</span>
+                      ? <span className="text-amber-600 font-bold text-xs" title="Opened">✓</span>
                       : <span className="text-gray-300 text-xs">—</span>}
                   </td>
                   <td className="px-3 py-2 text-center">
-                    {e.clicked
-                      ? <span className="text-orange-600 font-bold text-xs">✓</span>
-                      : <span className="text-gray-300 text-xs">—</span>}
+                    {e.clicked ? (
+                      <span className="text-orange-600 font-bold text-xs" title="Link clicked">✓</span>
+                    ) : (
+                      <span
+                        className="text-gray-300 text-xs"
+                        title={
+                          e.tracked_links?.length
+                            ? `${e.tracked_links.length} link(s) tracked in this email`
+                            : 'No tracked links found in this email'
+                        }
+                      >
+                        —
+                      </span>
+                    )}
+                    {e.tracked_links?.length > 0 && (
+                      <div className="text-[10px] text-gray-400 mt-0.5">
+                        <a
+                          href={`/c/${e.tracked_links[0].token}`}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="text-blue-500 hover:underline"
+                          title={`Test click tracking: ${e.tracked_links[0].original_url}`}
+                          onClick={(ev) => ev.stopPropagation()}
+                        >
+                          test link
+                        </a>
+                      </div>
+                    )}
                   </td>
                   <td className="px-3 py-2 text-center">
                     {e.replied

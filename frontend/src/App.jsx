@@ -36,16 +36,14 @@ function ProtectedRoute({ children }) {
 function AppRoutes() {
   const { user, loading } = useAuth();
 
-  // Register this browser's IP as a known IP (auto-expires after 1 week)
+  // Register this browser's IP as a known IP only if filtering is enabled
   useEffect(() => {
     if (user) {
       api.get('/settings/filter-known-ips').then(res => {
-        if (res.enabled !== false) {
+        if (res.enabled === true) {
           api.post('/settings/known-ips/heartbeat', {}).catch(() => {});
         }
-      }).catch(() => {
-        api.post('/settings/known-ips/heartbeat', {}).catch(() => {});
-      });
+      }).catch(() => {});
     }
   }, [user]);
 
