@@ -123,7 +123,7 @@ async def mark_unibox_thread_read(
     return {"ok": True, "thread_id": thread_id}
 
 
-_SYNC_PROVIDERS = ("gmail", "office365", "smtp")
+_SYNC_PROVIDERS = ("gmail", "office365", "smtp", "zoho")
 
 
 @router.post("/sync")
@@ -217,7 +217,9 @@ async def send_unibox_email(data: UniboxSendRequest, db: AsyncSession = Depends(
     gmail_account = None
     o365_account = None
     smtp_account = None
+    zoho_account = None
     o365_client_id = o365_client_secret = o365_tenant_id = ""
+    zoho_client_id = zoho_client_secret = zoho_region = ""
     reply_to = data.in_reply_to
     references = data.references
 
@@ -288,11 +290,38 @@ async def send_unibox_email(data: UniboxSendRequest, db: AsyncSession = Depends(
                 any_o365_msg = any_o365_row.scalar_one_or_none()
                 if any_o365_msg and any_o365_msg.internet_message_id and not reply_to:
                     reply_to = any_o365_msg.internet_message_id
+    elif provider == "zoho":
+        from app.models import ZohoAccount
+        from app.routers.zoho_oauth import refresh_access_token as _refresh_zoho
+        from app.app_settings import get_zoho_oauth_credentials
+
+        zoho_row = await db.execute(select(ZohoAccount).where(ZohoAccount.inbox_id == inbox.id))
+        zoho_account = zoho_row.scalar_one_or_none()
+        if zoho_account is None:
+            raise HTTPException(status_code=400, detail="Zoho account is not connected for this inbox")
+        zoho_client_id, zoho_client_secret, zoho_region = await get_zoho_oauth_credentials(db)
+        _refresh_zoho(zoho_account, zoho_client_id, zoho_client_secret, zoho_region)
+        await db.flush()
+
+        reply_graph_message_id = None
+        if data.thread_id and not reply_to:
+            latest_row = await db.execute(
+                select(GmailMessage)
+                .where(GmailMessage.inbox_id == inbox.id, GmailMessage.thread_id == data.thread_id)
+                .order_by(GmailMessage.internal_date.desc(), GmailMessage.created_at.desc())
+                .limit(1)
+            )
+            latest_msg = latest_row.scalar_one_or_none()
+            if latest_msg:
+                reply_to = _extract_message_id_from_headers(latest_msg.headers_json or "")
+                if reply_to and not references:
+                    references = reply_to
     else:
         account_row = await db.execute(select(GmailAccount).where(GmailAccount.inbox_id == inbox.id))
         gmail_account = account_row.scalar_one_or_none()
         if gmail_account is None:
             raise HTTPException(status_code=400, detail="Gmail account is not connected for this inbox")
+        reply_graph_message_id = None
         if data.thread_id and not reply_to:
             latest_row = await db.execute(
                 select(GmailMessage)
@@ -322,6 +351,10 @@ async def send_unibox_email(data: UniboxSendRequest, db: AsyncSession = Depends(
         office365_client_id=o365_client_id,
         office365_client_secret=o365_client_secret,
         office365_tenant_id=o365_tenant_id,
+        zoho_account=zoho_account if provider == "zoho" else None,
+        zoho_client_id=zoho_client_id if provider == "zoho" else "",
+        zoho_client_secret=zoho_client_secret if provider == "zoho" else "",
+        zoho_region=zoho_region if provider == "zoho" else "",
         thread_id=data.thread_id,
         conversation_id=data.thread_id if provider == "office365" else None,
         reply_graph_message_id=reply_graph_message_id if provider == "office365" else None,
@@ -372,7 +405,7 @@ async def send_unibox_email(data: UniboxSendRequest, db: AsyncSession = Depends(
             db,
             inbox_id=inbox.id,
             thread_id=thread_id,
-            gmail_message_id=send_result.gmail_message_id,
+            gmail_message_id=getattr(send_result, "gmail_message_id", None),
             rfc_message_id=send_result.message_id,
             subject=data.subject,
             to_email=str(data.to_email),
@@ -399,6 +432,8 @@ async def send_unibox_email(data: UniboxSendRequest, db: AsyncSession = Depends(
         o365_ss = o365_ss_row.scalar_one_or_none()
         if o365_ss:
             o365_ss.last_sync_at = utcnow()
+    elif provider == "zoho" and zoho_account:
+        zoho_account.updated_at = utcnow()
     else:
         sync_state_row = await db.execute(select(GmailSyncState).where(GmailSyncState.inbox_id == inbox.id))
         sync_state = sync_state_row.scalar_one_or_none()

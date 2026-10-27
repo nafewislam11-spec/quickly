@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
 
-from sqlalchemy import and_, delete, desc, exists, false, func, select
+from sqlalchemy import and_, delete, desc, exists, false, func, select, or_, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import time as time_provider
@@ -1244,6 +1244,20 @@ async def upsert_sent_message(
         row.body_plain = "" if is_html else body
         row.body_html = body if is_html else ""
 
+    # Mark the thread as a lead thread if the recipient is a known lead.
+    lead_res = await db.execute(select(Lead).where(func.lower(Lead.email) == to_email.lower()))
+    to_lead = lead_res.scalar_one_or_none()
+    if to_lead is not None:
+        th_res = await db.execute(
+            select(GmailThread).where(
+                GmailThread.inbox_id == inbox_id,
+                GmailThread.thread_id == thread_id,
+            )
+        )
+        th_obj = th_res.scalar_one_or_none()
+        if th_obj and not th_obj.is_lead_thread:
+            th_obj.is_lead_thread = True
+
     await db.flush()
     return row
 
@@ -1959,6 +1973,337 @@ async def _sync_inbox_smtp(db: AsyncSession, inbox, reason: str = "") -> set[tup
     return touched
 
 
+async def _sync_inbox_zoho(db: AsyncSession, inbox: Inbox, reason: str = "") -> set[tuple[int, str]]:
+    """Poll a Zoho Mail inbox for new incoming messages and lead replies."""
+    import json as _json
+    import urllib.error
+    import urllib.parse
+    import urllib.request
+    from app.app_settings import get_zoho_oauth_credentials
+    from app.models import CampaignLead, EmailLog, GmailMessage, GmailThread, Lead, LeadReply, QueueSlot, ZohoAccount
+    from app.routers.zoho_oauth import _get_mail_api_url, _get_user_account_info, refresh_access_token
+
+    touched: set[tuple[int, str]] = set()
+
+    za_res = await db.execute(select(ZohoAccount).where(ZohoAccount.inbox_id == inbox.id))
+    za = za_res.scalar_one_or_none()
+    if za is None:
+        return touched
+
+    # Ensure existing sent threads matching EmailLog are marked is_lead_thread
+    await db.execute(
+        update(GmailThread)
+        .where(
+            GmailThread.inbox_id == inbox.id,
+            GmailThread.is_lead_thread.is_(False),
+            exists(
+                select(1).select_from(EmailLog).where(
+                    EmailLog.inbox_id == inbox.id,
+                    EmailLog.thread_id == GmailThread.thread_id,
+                )
+            ),
+        )
+        .values(is_lead_thread=True)
+    )
+    await db.flush()
+
+    client_id, client_secret, region = await get_zoho_oauth_credentials(db)
+    region = za.region or region or "com"
+
+    # Refresh token if needed
+    if not za.access_token or (za.token_expiry and za.token_expiry <= time_provider.utcnow() + timedelta(minutes=5)):
+        new_tok = refresh_access_token(za, client_id, client_secret, region)
+        if new_tok:
+            za.access_token = new_tok
+            await db.flush()
+
+    account_id = za.zoho_account_id
+    if not account_id:
+        _, account_id = _get_user_account_info(za.access_token, region)
+        if account_id:
+            za.zoho_account_id = str(account_id)
+            await db.flush()
+
+    if not account_id:
+        log.warning("Zoho sync: no account_id for inbox_id=%s", inbox.id)
+        return touched
+
+    mail_url = _get_mail_api_url(region)
+
+    def _fetch_zoho_url(url: str, retried: bool = False) -> dict | None:
+        auth_headers = [f"Zoho-oauthtoken {za.access_token}", f"Bearer {za.access_token}"]
+        for auth_h in auth_headers:
+            req = urllib.request.Request(
+                url,
+                headers={"Authorization": auth_h, "Accept": "application/json"},
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=20) as resp:
+                    return _json.loads(resp.read().decode())
+            except urllib.error.HTTPError as e:
+                if e.code == 401 and not retried:
+                    new_tok = refresh_access_token(za, client_id, client_secret, region)
+                    if new_tok:
+                        za.access_token = new_tok
+                        return _fetch_zoho_url(url, retried=True)
+                log.warning("Zoho API HTTPError %s on %s", e.code, url)
+            except Exception as e:
+                log.warning("Zoho API error on %s: %s", url, e)
+        return None
+
+    # Discover Inbox folder if possible
+    folders_url = f"{mail_url}/api/accounts/{account_id}/folders"
+    f_payload = await asyncio.to_thread(_fetch_zoho_url, folders_url)
+    inbox_folder_id = ""
+    if f_payload and isinstance(f_payload.get("data"), list):
+        for f in f_payload["data"]:
+            if (f.get("folderName") or "").strip().lower() in ("inbox", "incoming"):
+                inbox_folder_id = str(f.get("folderId") or "")
+                break
+
+    if inbox_folder_id:
+        view_url = f"{mail_url}/api/accounts/{account_id}/messages/view?folderId={inbox_folder_id}&limit=50"
+    else:
+        view_url = f"{mail_url}/api/accounts/{account_id}/messages/view?limit=50"
+
+    payload = await asyncio.to_thread(_fetch_zoho_url, view_url)
+    if not payload:
+        return touched
+
+    messages_data = payload.get("data", [])
+    if not isinstance(messages_data, list):
+        return touched
+
+    own_addr = (inbox.email or "").lower()
+
+    for m in messages_data:
+        msg_id = str(m.get("messageId") or "")
+        if not msg_id:
+            continue
+        folder_id = str(m.get("folderId") or "") or inbox_folder_id
+        from_raw = m.get("fromAddress") or ""
+        clean_from = _extract_email_only(from_raw)
+
+        # Skip our own sent copies
+        if clean_from == own_addr:
+            continue
+
+        msg_pk = f"zoho:{msg_id}"
+
+        # Dedup: check if already in GmailMessage
+        existing = await db.execute(
+            select(GmailMessage).where(
+                GmailMessage.inbox_id == inbox.id,
+                GmailMessage.message_id == msg_pk,
+            )
+        )
+        if existing.scalar_one_or_none() is not None:
+            continue
+
+        # Fetch message content (HTML/text)
+        body_html = ""
+        body_plain = ""
+        if folder_id:
+            content_url = f"{mail_url}/api/accounts/{account_id}/folders/{folder_id}/messages/{msg_id}/content"
+            c_payload = await asyncio.to_thread(_fetch_zoho_url, content_url)
+            if c_payload and isinstance(c_payload.get("data"), dict):
+                body_html = c_payload["data"].get("content") or ""
+                body_plain = _strip_html_tags(body_html)
+
+        if not body_plain:
+            body_plain = m.get("summary") or ""
+
+        snippet = (body_plain or m.get("summary") or "")[:200]
+        raw_rt = m.get("receivedTime") or m.get("sentDateInGMT")
+        try:
+            rt_ms = int(raw_rt)
+        except (ValueError, TypeError):
+            rt_ms = int(time_provider.utcnow().timestamp() * 1000)
+
+        # Match lead
+        lead = None
+        if clean_from:
+            lead_res = await db.execute(select(Lead).where(func.lower(Lead.email) == clean_from))
+            lead = lead_res.scalar_one_or_none()
+
+        log_entry = None
+        thread_id = None
+        if lead is not None:
+            l_res = await db.execute(
+                select(EmailLog).where(
+                    EmailLog.lead_id == lead.id,
+                    EmailLog.inbox_id == inbox.id,
+                ).order_by(EmailLog.sent_at.desc()).limit(1)
+            )
+            log_entry = l_res.scalar_one_or_none()
+            if not log_entry:
+                l_res2 = await db.execute(
+                    select(EmailLog).where(
+                        EmailLog.lead_id == lead.id,
+                    ).order_by(EmailLog.sent_at.desc()).limit(1)
+                )
+                log_entry = l_res2.scalar_one_or_none()
+            if log_entry and log_entry.thread_id:
+                thread_id = log_entry.thread_id
+
+        if not thread_id:
+            clean_subj = (m.get("subject") or "").lower().replace("re:", "").replace("fwd:", "").strip()
+            if clean_subj:
+                subj_res = await db.execute(
+                    select(EmailLog.thread_id).where(
+                        EmailLog.inbox_id == inbox.id,
+                        func.lower(EmailLog.subject).contains(clean_subj),
+                    ).order_by(EmailLog.sent_at.desc()).limit(1)
+                )
+                matched_thread = subj_res.scalar_one_or_none()
+                if matched_thread:
+                    thread_id = matched_thread
+
+        if not thread_id:
+            thread_id = f"zoho-{msg_id}"
+
+        # Upsert thread
+        thread_obj = await _upsert_thread(
+            db,
+            inbox_id=inbox.id,
+            thread_id=thread_id,
+            snippet=snippet,
+            last_internal_date=rt_ms,
+        )
+        thread_obj.is_lead_thread = True
+        thread_obj.unread_lead_reply = True
+
+        # Insert message
+        headers = [
+            {"name": "From", "value": from_raw},
+            {"name": "To", "value": m.get("toAddress") or inbox.email},
+            {"name": "Subject", "value": m.get("subject") or "(no subject)"},
+            {"name": "Date", "value": _epoch_ms_to_dt(rt_ms).strftime("%a, %d %b %Y %H:%M:%S +0000") if rt_ms else time_provider.utcnow().strftime("%a, %d %b %Y %H:%M:%S +0000")},
+        ]
+        db.add(
+            GmailMessage(
+                inbox_id=inbox.id,
+                message_id=msg_pk,
+                thread_id=thread_id,
+                internal_date=rt_ms,
+                snippet=snippet,
+                headers_json=_json.dumps(headers),
+                label_ids_json=_json.dumps(["INBOX"]),
+                body_fetched=True,
+                body_plain=body_plain,
+                body_html=body_html,
+            )
+        )
+        await db.flush()
+
+        # ---------- NDR / bounce detection ----------
+        if _MAILER_DAEMON_RE.match(clean_from):
+            subject_hdr = m.get("subject") or ""
+            if not subject_hdr or _BOUNCE_SUBJECT_RE.search(subject_hdr):
+                bounced_addr = _extract_bounced_recipient(body_plain, body_html, snippet)
+                if bounced_addr:
+                    b_lead_res = await db.execute(select(Lead).where(func.lower(Lead.email) == bounced_addr))
+                    b_lead = b_lead_res.scalar_one_or_none()
+                    if b_lead is not None:
+                        b_rows = (
+                            await db.execute(select(CampaignLead).where(CampaignLead.lead_id == b_lead.id))
+                        ).scalars().all()
+                        for _bcl in b_rows:
+                            _bcl.enrollment_status = "bounced"
+                        b_cl_ids = [r.id for r in b_rows]
+                        if b_cl_ids:
+                            await db.execute(delete(QueueSlot).where(QueueSlot.campaign_lead_id.in_(b_cl_ids)))
+                        await db.flush()
+            touched.add((inbox.id, thread_id))
+            continue
+
+        # ---------- Lead-reply detection ----------
+        if lead is not None:
+            if log_entry and log_entry.campaign_id:
+                campaign_ids = [log_entry.campaign_id]
+            else:
+                cl_res = await db.execute(
+                    select(CampaignLead.campaign_id).where(CampaignLead.lead_id == lead.id)
+                )
+                campaign_ids = [r[0] for r in cl_res.all()]
+
+            for camp_id in campaign_ids:
+                existing_reply = await db.execute(
+                    select(LeadReply).where(
+                        LeadReply.lead_id == lead.id,
+                        LeadReply.campaign_id == camp_id,
+                    )
+                )
+                if existing_reply.scalar_one_or_none() is None:
+                    db.add(LeadReply(lead_id=lead.id, campaign_id=camp_id))
+
+                cl_touch = await db.execute(
+                    select(CampaignLead).where(
+                        CampaignLead.lead_id == lead.id,
+                        CampaignLead.campaign_id == camp_id,
+                    )
+                )
+                _clt = cl_touch.scalar_one_or_none()
+                if _clt is not None:
+                    _clt.enrollment_status = "replied"
+                    if not _clt.interest_status:
+                        _clt.interest_status = "interested"
+
+            # STOP CAMPAIGN SENDS: Delete all remaining queue slots
+            if campaign_ids:
+                cl_ids_res = await db.execute(
+                    select(CampaignLead.id).where(
+                        CampaignLead.lead_id == lead.id,
+                        CampaignLead.campaign_id.in_(campaign_ids),
+                    )
+                )
+                cl_ids = [r[0] for r in cl_ids_res.all()]
+                if cl_ids:
+                    await db.execute(delete(QueueSlot).where(QueueSlot.campaign_lead_id.in_(cl_ids)))
+
+            await db.flush()
+
+            webhook_data: dict[str, Any] = {
+                "lead_email": clean_from or (lead.email or "").lower(),
+                "lead_id": lead.id,
+                "lead_name": lead.name or "",
+                "thread_id": thread_id,
+                "inbox_id": inbox.id,
+                "inbox_email": inbox.email,
+                "message_id": msg_pk,
+                "timestamp": time_provider.utcnow().isoformat() + "Z",
+            }
+            asyncio.create_task(
+                unibox_events.publish(
+                    {
+                        "type": "unibox.notification",
+                        "reason": "lead_reply",
+                        "inbox_id": inbox.id,
+                        "thread_id": thread_id,
+                        "lead_id": lead.id,
+                        "lead_email": clean_from,
+                        "timestamp": time_provider.utcnow().isoformat() + "Z",
+                    }
+                )
+            )
+            asyncio.create_task(_fire_lead_reply_webhook_bg(webhook_data))
+            asyncio.create_task(
+                _classify_and_notify_bg(
+                    lead_id=lead.id,
+                    lead_email=clean_from or lead.email,
+                    lead_name=lead.name or "",
+                    campaign_ids=campaign_ids,
+                    reply_text=body_plain or snippet,
+                    thread_id=thread_id,
+                )
+            )
+
+        touched.add((inbox.id, thread_id))
+
+    log.info("Zoho sync inbox_id=%s fetched=%s touched=%s", inbox.id, len(messages_data), len(touched))
+    return touched
+
+
 async def _cleanup_thread_if_empty(db: AsyncSession, inbox_id: int, thread_id: str) -> None:
     count_res = await db.execute(
         select(func.count())
@@ -2080,6 +2425,7 @@ async def list_unibox_conversations(
             GmailThread.is_lead_thread,
             GmailThread.unread_lead_reply,
             Inbox.email.label("account_email"),
+            Inbox.provider.label("provider"),
             latest_message_sq.c.snippet.label("last_snippet"),
             latest_message_sq.c.headers_json.label("last_headers_json"),
             lead_sq.c.lead_email.label("lead_email"),
@@ -2103,7 +2449,7 @@ async def list_unibox_conversations(
         )
     )
     if leads_only:
-        gmail_stmt = gmail_stmt.where(GmailThread.is_lead_thread.is_(True))
+        gmail_stmt = gmail_stmt.where(or_(GmailThread.is_lead_thread.is_(True), lead_sq.c.lead_id.isnot(None)))
     if lead_status:
         gmail_stmt = gmail_stmt.where(_unibox_lead_status_filter_criterion(lead_sq, lead_status))
 
@@ -2134,6 +2480,7 @@ async def list_unibox_conversations(
             Office365Thread.is_lead_thread,
             Office365Thread.unread_lead_reply,
             Inbox.email.label("account_email"),
+            Inbox.provider.label("provider"),
             o365_latest_msg_sq.c.snippet.label("last_snippet"),
             lead_sq.c.lead_email.label("lead_email"),
             lead_sq.c.lead_status.label("lead_status"),
@@ -2156,7 +2503,7 @@ async def list_unibox_conversations(
         )
     )
     if leads_only:
-        o365_stmt = o365_stmt.where(Office365Thread.is_lead_thread.is_(True))
+        o365_stmt = o365_stmt.where(or_(Office365Thread.is_lead_thread.is_(True), lead_sq.c.lead_id.isnot(None)))
     if lead_status:
         o365_stmt = o365_stmt.where(_unibox_lead_status_filter_criterion(lead_sq, lead_status))
 
@@ -2187,6 +2534,7 @@ async def list_unibox_conversations(
             SmtpThread.is_lead_thread,
             SmtpThread.unread_lead_reply,
             Inbox.email.label("account_email"),
+            Inbox.provider.label("provider"),
             smtp_latest_msg_sq.c.snippet.label("last_snippet"),
             lead_sq.c.lead_email.label("lead_email"),
             lead_sq.c.lead_status.label("lead_status"),
@@ -2209,7 +2557,7 @@ async def list_unibox_conversations(
         )
     )
     if leads_only:
-        smtp_stmt = smtp_stmt.where(SmtpThread.is_lead_thread.is_(True))
+        smtp_stmt = smtp_stmt.where(or_(SmtpThread.is_lead_thread.is_(True), lead_sq.c.lead_id.isnot(None)))
     if lead_status:
         smtp_stmt = smtp_stmt.where(_unibox_lead_status_filter_criterion(lead_sq, lead_status))
 
@@ -2231,11 +2579,11 @@ async def list_unibox_conversations(
                 "last_message_snippet": last_snippet,
                 "timestamp": _dt_to_iso(ts_dt),
                 "_sort_ts": ts_dt.timestamp() if ts_dt else 0.0,
-                "is_lead_thread": bool(row.is_lead_thread),
+                "is_lead_thread": bool(row.is_lead_thread or row.lead_email),
                 "unread_lead_reply": bool(row.unread_lead_reply),
                 "lead_email": row.lead_email or None,
                 "lead_status": row.lead_status or None,
-                "provider": "gmail",
+                "provider": getattr(row, "provider", None) or "gmail",
             }
         )
 
@@ -2250,11 +2598,11 @@ async def list_unibox_conversations(
                 "last_message_snippet": (row.last_snippet or "")[:200],
                 "timestamp": _dt_to_iso(ts_dt),
                 "_sort_ts": ts_dt.timestamp() if ts_dt else 0.0,
-                "is_lead_thread": bool(row.is_lead_thread),
+                "is_lead_thread": bool(row.is_lead_thread or row.lead_email),
                 "unread_lead_reply": bool(row.unread_lead_reply),
                 "lead_email": row.lead_email or None,
                 "lead_status": row.lead_status or None,
-                "provider": "office365",
+                "provider": getattr(row, "provider", None) or "office365",
             }
         )
 
@@ -2269,11 +2617,11 @@ async def list_unibox_conversations(
                 "last_message_snippet": (row.last_snippet or "")[:200],
                 "timestamp": _dt_to_iso(ts_dt),
                 "_sort_ts": ts_dt.timestamp() if ts_dt else 0.0,
-                "is_lead_thread": bool(row.is_lead_thread),
+                "is_lead_thread": bool(row.is_lead_thread or row.lead_email),
                 "unread_lead_reply": bool(row.unread_lead_reply),
                 "lead_email": row.lead_email or None,
                 "lead_status": row.lead_status or None,
-                "provider": "smtp",
+                "provider": getattr(row, "provider", None) or "smtp",
             }
         )
 
@@ -3196,7 +3544,7 @@ async def sync_single_inbox(inbox_id: int, reason: str = "scheduled") -> bool:
     hydrate_thread_ids: set[str] = set()
     try:
         async with AsyncSessionLocal() as db:
-            inbox_res = await db.execute(select(Inbox).where(Inbox.id == inbox_id, Inbox.provider.in_(["gmail", "office365", "smtp"])))
+            inbox_res = await db.execute(select(Inbox).where(Inbox.id == inbox_id, Inbox.provider.in_(["gmail", "office365", "smtp", "zoho"])))
             inbox = inbox_res.scalar_one_or_none()
             if not inbox:
                 await db.rollback()
@@ -3206,6 +3554,9 @@ async def sync_single_inbox(inbox_id: int, reason: str = "scheduled") -> bool:
                 hydrate_thread_ids = set()
             elif inbox.provider == "smtp":
                 touched = await _sync_inbox_smtp(db, inbox, reason)
+                hydrate_thread_ids = set()
+            elif inbox.provider == "zoho":
+                touched = await _sync_inbox_zoho(db, inbox, reason)
                 hydrate_thread_ids = set()
             else:
                 touched, hydrate_thread_ids = await _sync_inbox(db, inbox, reason)
@@ -3248,7 +3599,7 @@ async def backfill_single_inbox(
     touched: set[tuple[int, str]] = set()
     try:
         async with AsyncSessionLocal() as db:
-            inbox_res = await db.execute(select(Inbox).where(Inbox.id == inbox_id, Inbox.provider.in_(["gmail", "office365", "smtp"])))
+            inbox_res = await db.execute(select(Inbox).where(Inbox.id == inbox_id, Inbox.provider.in_(["gmail", "office365", "smtp", "zoho"])))
             inbox = inbox_res.scalar_one_or_none()
             if not inbox:
                 await db.rollback()
@@ -3260,6 +3611,9 @@ async def backfill_single_inbox(
             elif inbox.provider == "smtp":
                 # IMAP has no date-window backfill API here; re-use full sync
                 touched = await _sync_inbox_smtp(db, inbox, reason)
+                _meta = {}
+            elif inbox.provider == "zoho":
+                touched = await _sync_inbox_zoho(db, inbox, reason)
                 _meta = {}
             else:
                 touched, _meta = await _backfill_older_window(db, inbox, window_days=window_days)
@@ -3285,7 +3639,7 @@ async def backfill_single_inbox(
 
 async def sync_all_inboxes(reason: str = "scheduled") -> int:
     async with AsyncSessionLocal() as db:
-        rows = await db.execute(select(Inbox.id).where(Inbox.provider.in_(["gmail", "office365", "smtp"])))
+        rows = await db.execute(select(Inbox.id).where(Inbox.provider.in_(["gmail", "office365", "smtp", "zoho"])))
         inbox_ids = [row[0] for row in rows.all()]
 
     synced = 0
@@ -3334,7 +3688,7 @@ async def queue_backfill_for_all_inboxes(
 ) -> None:
     async def _runner() -> None:
         async with AsyncSessionLocal() as db:
-            rows = await db.execute(select(Inbox.id).where(Inbox.provider.in_(["gmail", "office365", "smtp"])))
+            rows = await db.execute(select(Inbox.id).where(Inbox.provider.in_(["gmail", "office365", "smtp", "zoho"])))
             inbox_ids = [row[0] for row in rows.all()]
         for inbox_id in inbox_ids:
             await backfill_single_inbox(inbox_id, window_days=window_days, reason=reason)
