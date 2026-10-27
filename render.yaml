@@ -4,7 +4,7 @@ services:
     env: docker
     dockerfilePath: ./Dockerfile
     plan: free
-    healthCheckPath: /api/status
+    healthCheckPath: /healthz
     envVars:
       - key: PORT
         value: 8000

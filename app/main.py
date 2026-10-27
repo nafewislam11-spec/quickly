@@ -290,6 +290,13 @@ app.mount(
 if (BASE_DIR / "static").exists():
     app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")
 
+@app.get("/healthz")
+@app.get("/health")
+async def health_check():
+    """Unauthenticated healthcheck endpoint for Render and uptime monitoring."""
+    return {"status": "ok"}
+
+
 @app.get("/api/status")
 async def api_status(request: Request, user=Depends(_auth_dep)):
     """Schedule and send-job status so you can verify the worker is running."""
