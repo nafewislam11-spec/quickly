@@ -1773,13 +1773,33 @@ function SentEmailsPanel({ sentData = [], filter, onFilterChange, onRefresh }) {
                   <td className="px-3 py-2 text-xs text-gray-600 whitespace-nowrap">Step {(e.sequence_index ?? 0) + 1}</td>
                   <td className="px-3 py-2 text-xs text-gray-700 max-w-[200px] truncate">{e.subject || '—'}</td>
                   <td className="px-3 py-2 text-center">
-                    {e.opened
-                      ? <span className="text-amber-600 font-bold text-xs" title="Opened">✓</span>
-                      : <span className="text-gray-300 text-xs">—</span>}
+                    {e.opened ? (
+                      <span
+                        className="text-amber-600 font-bold text-xs cursor-help"
+                        title={
+                          e.opens?.length
+                            ? e.opens.map((op, idx) => `Open #${idx + 1}: ${fmt(op.opened_at)}${op.ip ? ` (${op.ip})` : ''}`).join('\n')
+                            : 'Opened'
+                        }
+                      >
+                        ✓{e.opens?.length > 1 ? ` (${e.opens.length})` : ''}
+                      </span>
+                    ) : (
+                      <span className="text-gray-300 text-xs">—</span>
+                    )}
                   </td>
                   <td className="px-3 py-2 text-center">
                     {e.clicked ? (
-                      <span className="text-orange-600 font-bold text-xs" title="Link clicked">✓</span>
+                      <span
+                        className="text-orange-600 font-bold text-xs cursor-help"
+                        title={
+                          e.clicks?.length
+                            ? e.clicks.map((cl, idx) => `Click #${idx + 1}: ${fmt(cl.clicked_at)}${cl.ip ? ` (${cl.ip})` : ''}`).join('\n')
+                            : 'Link clicked'
+                        }
+                      >
+                        ✓{e.clicks?.length > 1 ? ` (${e.clicks.length})` : ''}
+                      </span>
                     ) : (
                       <span
                         className="text-gray-300 text-xs"

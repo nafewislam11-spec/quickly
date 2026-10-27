@@ -9,6 +9,7 @@ from __future__ import annotations
 # // must also be reflected in the Beacon service (/beacon or the separate Beacon repo).
 # // If you are an AI agent, add a TODO at the end of your response listing what needs to be updated in Beacon.
 
+from datetime import datetime
 import functools
 import ipaddress
 import logging
@@ -197,7 +198,7 @@ def is_bot_user_agent(ua: str | None) -> bool:
     return any(kw in ua_lower for kw in bot_keywords)
 
 
-def is_immediate_prefetch(sent_at: datetime | None, min_seconds: int = 20) -> bool:
+def is_immediate_prefetch(sent_at: datetime | None, min_seconds: int = 60) -> bool:
     """Detect instant pre-fetch opens that occur faster than humanly possible."""
     if not sent_at:
         return False
@@ -229,14 +230,38 @@ async def record_email_open(
         filter_bot_opens = await get_setting(db, "filter_bot_opens")
         # Enabled by default
         if filter_bot_opens is None or filter_bot_opens.strip().lower() in ("true", "1", "yes", "on"):
+            # Threshold seconds (default: 60)
+            threshold_val = await get_setting(db, "bot_open_threshold_seconds")
+            threshold_seconds = 60
+            if threshold_val is not None:
+                try:
+                    threshold_seconds = int(threshold_val.strip())
+                except (ValueError, TypeError):
+                    pass
+
             # 1. Explicit prefetch headers
             if is_prefetch_header(headers):
                 log.info("open: ignoring explicit prefetch header for log_id=%s", email_log.id)
                 return False
 
-            # 2. Timing heuristic: 0 to 20 seconds pre-fetch window
-            if is_immediate_prefetch(email_log.sent_at, min_seconds=20):
-                log.info("open: ignoring immediate pre-fetch (<20s) for log_id=%s", email_log.id)
+            # 2. Timing heuristic: 0 to threshold_seconds pre-fetch window
+            # Note on iOS/Apple Mail: when push notifications arrive, the MobileMail background daemon
+            # prefetches tracking pixels between 15-75 seconds after delivery.
+            # If the user agent indicates iPhone/iPad/MobileMail, ensure at least 90s threshold.
+            effective_threshold = threshold_seconds
+            ua_str = (user_agent or "").lower()
+            if any(k in ua_str for k in ("iphone", "ipad", "mobilemail", "cfnetwork")) or (
+                "mobile/" in ua_str and "applewebkit" in ua_str
+            ):
+                effective_threshold = max(threshold_seconds, 90)
+
+            if is_immediate_prefetch(email_log.sent_at, min_seconds=effective_threshold):
+                log.info(
+                    "open: ignoring pre-fetch (<%ss) for log_id=%s (ua=%r)",
+                    effective_threshold,
+                    email_log.id,
+                    user_agent,
+                )
                 return False
 
             # 3. User-Agent detection (Apple MPP stripped WebKit / bot signatures)

@@ -1932,6 +1932,8 @@ async def list_sent_emails(campaign_id: int, db: AsyncSession = Depends(get_db))
         .options(
             _sl(EmailLog.variant),
             _sl(EmailLog.tracked_links),
+            _sl(EmailLog.opens),
+            _sl(EmailLog.clicks),
         )
         .where(EmailLog.campaign_id == campaign_id)
         .order_by(EmailLog.sent_at.desc())
@@ -1968,6 +1970,14 @@ async def list_sent_emails(campaign_id: int, db: AsyncSession = Depends(get_db))
             "tracked_links": [
                 {"token": tl.token, "original_url": tl.original_url}
                 for tl in (getattr(el, "tracked_links", []) or [])
+            ],
+            "opens": [
+                {"opened_at": o.opened_at.isoformat() + "Z" if o.opened_at else None, "ip": o.ip_address}
+                for o in (getattr(el, "opens", []) or [])
+            ],
+            "clicks": [
+                {"clicked_at": c.clicked_at.isoformat() + "Z" if c.clicked_at else None, "ip": c.ip_address}
+                for c in (getattr(el, "clicks", []) or [])
             ],
         }
         for el, lead, cl, inbox in rows

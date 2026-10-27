@@ -302,6 +302,7 @@ export default function Settings() {
   const [newIpAddress, setNewIpAddress] = useState('');
   const [filterKnownIps, setFilterKnownIps] = useState(false);
   const [filterBotOpens, setFilterBotOpens] = useState(true);
+  const [botOpenThreshold, setBotOpenThreshold] = useState(60);
 
   // Zoho Mail OAuth
   const [zohoSettings, setZohoSettings] = useState({ client_id: '', client_secret: '', region: 'com', configured: false, redirect_uri: '' });
@@ -349,7 +350,10 @@ export default function Settings() {
       setKnownIps(ipData.known_ips || []);
       setCurrentIp(ipData.current_ip || '');
       setFilterKnownIps(ipData.filter_enabled === true);
-      if (botOpensData) setFilterBotOpens(botOpensData.enabled !== false);
+      if (botOpensData) {
+        setFilterBotOpens(botOpensData.enabled !== false);
+        setBotOpenThreshold(botOpensData.threshold_seconds || 60);
+      }
       setApiKeys(keysData || []);
       if (notifData) {
         setNotifConfig(notifData);
@@ -1034,7 +1038,7 @@ export default function Settings() {
                   const val = e.target.checked;
                   setFilterBotOpens(val);
                   try {
-                    await api.post('/settings/filter-bot-opens', { enabled: val });
+                    await api.post('/settings/filter-bot-opens', { enabled: val, threshold_seconds: botOpenThreshold });
                     notify(val ? 'Apple MPP & Bot open filtering enabled' : 'Bot open filtering disabled', 'success');
                   } catch (err) {
                     notify(err.message, 'error');
@@ -1044,8 +1048,33 @@ export default function Settings() {
               <span>Filter Apple Mail Privacy Protection (MPP) & automated bot opens</span>
             </label>
             <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
-              Ignores fake pre-fetch opens from Apple Mail proxy servers (17.0.0.0/8 & Apple Private Relay), stripped WebKit/bot User-Agents (e.g. Mozilla/5.0), prefetch headers, and instant pre-fetch opens within 20 seconds of delivery.
+              Ignores fake pre-fetch opens from Apple Mail proxy servers (17.0.0.0/8 & Apple Private Relay), stripped WebKit/bot User-Agents (e.g. Mozilla/5.0), prefetch headers, and instant background pre-fetches within the selected window.
             </p>
+            {filterBotOpens && (
+              <div className="mt-2.5 flex items-center gap-2 text-xs text-gray-600 dark:text-gray-300">
+                <span>Pre-fetch filter threshold:</span>
+                <select
+                  value={botOpenThreshold}
+                  onChange={async (e) => {
+                    const sec = parseInt(e.target.value, 10) || 60;
+                    setBotOpenThreshold(sec);
+                    try {
+                      await api.post('/settings/filter-bot-opens', { enabled: filterBotOpens, threshold_seconds: sec });
+                      notify(`Bot pre-fetch threshold set to ${sec}s`, 'success');
+                    } catch (err) {
+                      notify(err.message, 'error');
+                    }
+                  }}
+                  className="rounded border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-xs px-2 py-1"
+                >
+                  <option value={30}>30 seconds</option>
+                  <option value={60}>60 seconds (Recommended)</option>
+                  <option value={90}>90 seconds (Aggressive / iOS Mail)</option>
+                  <option value={120}>120 seconds (Max Security)</option>
+                </select>
+                <span className="text-gray-400 text-[11px]">(iOS Mail daemons automatically use 90s+)</span>
+              </div>
+            )}
           </div>
 
           <Button size="sm" variant="outline" onClick={() => setKnownIpsOpen(true)}>

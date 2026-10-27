@@ -895,6 +895,7 @@ class _FilterKnownIPsUpdate(_BaseModel):
 
 class _FilterBotOpensUpdate(_BaseModel):
     enabled: bool
+    threshold_seconds: int | None = 60
 
 
 @router.get("/filter-known-ips")
@@ -918,15 +919,26 @@ async def get_filter_bot_opens(db: AsyncSession = Depends(get_db)):
     from app.app_settings import get_setting
     val = await get_setting(db, "filter_bot_opens")
     enabled = True if val is None else val.strip().lower() in ("true", "1", "yes", "on")
-    return {"enabled": enabled}
+    threshold_val = await get_setting(db, "bot_open_threshold_seconds")
+    threshold_seconds = 60
+    if threshold_val is not None:
+        try:
+            threshold_seconds = int(threshold_val.strip())
+        except (ValueError, TypeError):
+            pass
+    return {"enabled": enabled, "threshold_seconds": threshold_seconds}
 
 
 @router.post("/filter-bot-opens")
 async def set_filter_bot_opens(payload: _FilterBotOpensUpdate, db: AsyncSession = Depends(get_db)):
     from app.app_settings import put_setting
     await put_setting(db, "filter_bot_opens", "true" if payload.enabled else "false")
+    thresh = 60
+    if payload.threshold_seconds is not None:
+        thresh = max(5, min(600, payload.threshold_seconds))
+        await put_setting(db, "bot_open_threshold_seconds", str(thresh))
     await db.commit()
-    return {"ok": True, "enabled": payload.enabled}
+    return {"ok": True, "enabled": payload.enabled, "threshold_seconds": thresh}
 
 
 @router.get("/known-ips")

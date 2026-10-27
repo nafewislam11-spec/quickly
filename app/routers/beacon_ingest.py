@@ -64,7 +64,9 @@ async def beacon_ingest(request: Request, db: AsyncSession = Depends(get_db)):
         raise HTTPException(422, "invalid ip_address")
 
     if kind == "open":
-        await record_email_open(db, path_token, ip)
+        ua = data.get("user_agent")
+        hdrs = data.get("headers")
+        await record_email_open(db, path_token, ip, user_agent=ua, headers=hdrs)
         return {"ok": True}
 
     if kind == "click":
