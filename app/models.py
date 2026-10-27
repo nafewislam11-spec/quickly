@@ -128,6 +128,7 @@ class Inbox(Base):
     office365_sync_state = relationship("Office365SyncState", uselist=False, cascade="all, delete-orphan")
     office365_threads = relationship("Office365Thread", back_populates="inbox", cascade="all, delete-orphan")
     office365_graph_subscription = relationship("Office365GraphSubscription", back_populates="inbox", uselist=False, cascade="all, delete-orphan")
+    zoho_account = relationship("ZohoAccount", back_populates="inbox", uselist=False, cascade="all, delete-orphan")
     smtp_account = relationship("SmtpAccount", back_populates="inbox", uselist=False, cascade="all, delete-orphan")
     smtp_sync_state = relationship("SmtpSyncState", uselist=False, cascade="all, delete-orphan")
     smtp_threads = relationship("SmtpThread", back_populates="inbox", cascade="all, delete-orphan")
@@ -726,6 +727,28 @@ class Office365GraphSubscription(Base):
     created_at = Column(DateTime, default=_utcnow)
     updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
     inbox = relationship("Inbox", back_populates="office365_graph_subscription")
+
+
+# ---------------------------------------------------------------------------
+# Zoho Mail integration models
+# ---------------------------------------------------------------------------
+
+class ZohoAccount(Base):
+    """Stores Zoho Mail OAuth 2.0 tokens linked to an Inbox."""
+    __tablename__ = "zoho_account"
+    id = Column(Integer, primary_key=True, index=True)
+    inbox_id = Column(Integer, ForeignKey("inbox.id"), nullable=False, unique=True)
+    zoho_email = Column(String(255), nullable=False)
+    zoho_account_id = Column(String(255), nullable=False, default="")
+    access_token = Column(Text, nullable=False)
+    refresh_token = Column(Text, nullable=False)
+    token_expiry = Column(DateTime, nullable=True)
+    region = Column(String(32), default="com")
+    api_domain = Column(String(255), default="")
+    scopes = Column(String(1024), default="ZohoMail.messages.ALL ZohoMail.accounts.READ offline_access")
+    created_at = Column(DateTime, default=_utcnow)
+    updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
+    inbox = relationship("Inbox", back_populates="zoho_account")
 
 
 # ---------------------------------------------------------------------------

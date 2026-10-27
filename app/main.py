@@ -35,6 +35,7 @@ from app.settings_manager import settings
 from app.routers import inbox, leads, campaigns, test_mode
 from app.routers import gmail_oauth
 from app.routers import office365_oauth
+from app.routers import zoho_oauth
 from app.routers import office365_webhook as office365_webhook_router
 from app.routers import schedule as schedule_router
 from app.routers import settings as settings_router
@@ -251,6 +252,8 @@ app.include_router(gmail_oauth.router)
 app.include_router(gmail_oauth.callback_router)
 app.include_router(office365_oauth.router)
 app.include_router(office365_oauth.callback_router)
+app.include_router(zoho_oauth.router)
+app.include_router(zoho_oauth.callback_router)
 app.include_router(office365_webhook_router.router)
 app.include_router(schedule_router.router, dependencies=_auth_deps)
 app.include_router(settings_router.router, dependencies=_auth_deps)

@@ -212,6 +212,24 @@ async def _run_migrations(conn) -> None:
         "ALTER TABLE smtp_account ADD COLUMN IF NOT EXISTS last_send_at TIMESTAMP WITHOUT TIME ZONE NULL",
         # 2026-09-22: per-campaign RFC 8058 one-click unsubscribe toggle
         "ALTER TABLE campaign ADD COLUMN IF NOT EXISTS add_one_click_unsubscribe BOOLEAN NOT NULL DEFAULT TRUE",
+        # 2026-10-27: Zoho Mail OAuth 2.0 integration
+        """
+        CREATE TABLE IF NOT EXISTS zoho_account (
+            id SERIAL PRIMARY KEY,
+            inbox_id INTEGER NOT NULL UNIQUE REFERENCES inbox(id) ON DELETE CASCADE,
+            zoho_email VARCHAR(255) NOT NULL,
+            zoho_account_id VARCHAR(255) NOT NULL DEFAULT '',
+            access_token TEXT NOT NULL,
+            refresh_token TEXT NOT NULL,
+            token_expiry TIMESTAMP WITHOUT TIME ZONE,
+            region VARCHAR(32) DEFAULT 'com',
+            api_domain VARCHAR(255) DEFAULT '',
+            scopes VARCHAR(1024) DEFAULT 'ZohoMail.messages.ALL ZohoMail.accounts.READ offline_access',
+            created_at TIMESTAMP WITHOUT TIME ZONE DEFAULT NOW(),
+            updated_at TIMESTAMP WITHOUT TIME ZONE DEFAULT NOW()
+        )
+        """,
+        "CREATE INDEX IF NOT EXISTS ix_zoho_account_inbox_id ON zoho_account (inbox_id)",
         # 2026-09-23: exact rendered body sent on each EmailLog.  Lets the Sent
         # view and quoted follow-ups reproduce what was actually sent even when
         # the template uses {{random: ...}} (which cannot be re-derived later).

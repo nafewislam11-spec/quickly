@@ -542,7 +542,7 @@ async def generate_connect_url_new_inbox(
     _user=Depends(get_current_user),
 ):
     """Generate a one-time connect URL for a *new* inbox whose email isn't known yet."""
-    if data.provider not in ("gmail", "office365"):
+    if data.provider not in ("gmail", "office365", "zoho"):
         raise HTTPException(400, f"Unsupported provider '{data.provider}'")
     if data.max_per_day < 1 or data.max_per_day > 1000:
         raise HTTPException(400, "max_per_day must be between 1 and 1000")
@@ -719,6 +719,48 @@ async def oauth_connect_redirect(
             "prompt": "consent",
         }
         url = f"{authority}/oauth2/v2.0/authorize?{urllib.parse.urlencode(params)}"
+        return RedirectResponse(url)
+
+    elif provider == "zoho":
+        from app.app_settings import get_zoho_oauth_credentials
+        client_id, client_secret, region = await get_zoho_oauth_credentials(db)
+        if not client_id or not client_secret:
+            raise HTTPException(400, "Zoho Mail OAuth not configured.")
+
+        state_data = json.dumps({
+            "display_name": display_name,
+            "max_per_day": max_per_day,
+            "wait_minutes_between": wait_minutes_between,
+            "max_jitter_seconds": max_jitter_seconds,
+            "tracking_domain": tracking_domain,
+            "ramp_up_enabled": ramp_up_enabled,
+            "ramp_up_start": ramp_up_start,
+            "ramp_up_step_size": ramp_up_step_size,
+            "source": "connect_url",
+            "_csrf": csrf_token,
+        })
+
+        csrf_state = OAuthState(
+            state_token=csrf_token,
+            purpose="inbox_zoho",
+            metadata_json=state_data,
+            expires_at=now + timedelta(minutes=10),
+        )
+        db.add(csrf_state)
+        await db.flush()
+
+        from app.routers.zoho_oauth import ZOHO_SCOPES, _get_accounts_url
+        accounts_url = _get_accounts_url(region)
+        params = {
+            "client_id": client_id,
+            "redirect_uri": settings.zoho_redirect_uri,
+            "response_type": "code",
+            "scope": ",".join(ZOHO_SCOPES),
+            "access_type": "offline",
+            "prompt": "consent",
+            "state": state_data,
+        }
+        url = f"{accounts_url}/oauth/v2/auth?{urllib.parse.urlencode(params)}"
         return RedirectResponse(url)
 
     else:

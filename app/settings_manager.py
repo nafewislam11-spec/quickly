@@ -50,6 +50,11 @@ class Settings:
         self.office365_client_id: str = os.getenv("OFFICE365_CLIENT_ID", "")
         self.office365_client_secret: str = os.getenv("OFFICE365_CLIENT_SECRET", "")
         self.office365_tenant_id: str = os.getenv("OFFICE365_TENANT_ID", "common")
+
+        # Zoho Mail OAuth
+        self.zoho_client_id: str = os.getenv("ZOHO_CLIENT_ID", "")
+        self.zoho_client_secret: str = os.getenv("ZOHO_CLIENT_SECRET", "")
+        self.zoho_region: str = os.getenv("ZOHO_REGION", "com").strip().lower() or "com"
         
         # Background job interval
         self.queue_check_interval_minutes: int = 1
@@ -97,6 +102,10 @@ class Settings:
         return f"{self.base_url.rstrip('/')}/oauth/office365/callback"
 
     @property
+    def zoho_redirect_uri(self) -> str:
+        return f"{self.base_url.rstrip('/')}/oauth/zoho/callback"
+
+    @property
     def app_google_redirect_uri(self) -> str:
         return f"{self.base_url.rstrip('/')}/oauth/app/google/callback"
 
@@ -130,6 +139,12 @@ class Settings:
                 self.time_offset_days = int(data["time_offset_days"])
             except Exception:
                 self.time_offset_days = 0
+        if "zoho_client_id" in data and data["zoho_client_id"]:
+            self.zoho_client_id = data["zoho_client_id"]
+        if "zoho_client_secret" in data and data["zoho_client_secret"]:
+            self.zoho_client_secret = data["zoho_client_secret"]
+        if "zoho_region" in data and data["zoho_region"]:
+            self.zoho_region = data["zoho_region"]
 
 
 # Global settings instance

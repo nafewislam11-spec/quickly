@@ -1,0 +1,30 @@
+services:
+  - type: web
+    name: quickly-app
+    env: docker
+    dockerfilePath: ./Dockerfile
+    plan: starter
+    healthCheckPath: /api/status
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: quickly-postgres
+          property: connectionString
+      - key: BASE_URL
+        sync: false
+      - key: QUICKLY_SECRET_KEY
+        generateValue: true
+      - key: QUICKLY_ENCRYPTION_KEY
+        generateValue: true
+      - key: ZOHO_CLIENT_ID
+        sync: false
+      - key: ZOHO_CLIENT_SECRET
+        sync: false
+      - key: ZOHO_REGION
+        value: com
+
+databases:
+  - name: quickly-postgres
+    databaseName: quickly
+    user: quickly_user
+    plan: free

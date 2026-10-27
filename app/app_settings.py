@@ -231,6 +231,53 @@ async def get_office365_oauth_credentials(db: AsyncSession | None = None) -> tup
     )
 
 
+# Zoho Mail OAuth convenience ---------------------------------------------------
+
+ZOHO_CLIENT_ID_KEY = "zoho_client_id"
+ZOHO_CLIENT_SECRET_KEY = "zoho_client_secret"
+ZOHO_REGION_KEY = "zoho_region"
+
+
+async def get_zoho_oauth_credentials(db: AsyncSession | None = None) -> tuple[str, str, str]:
+    """Return ``(client_id, client_secret, region)`` from DB or settings."""
+    cid = settings.zoho_client_id
+    csec = settings.zoho_client_secret
+    reg = settings.zoho_region or "com"
+    if db is not None:
+        try:
+            db_cid = await get_setting(db, ZOHO_CLIENT_ID_KEY)
+            db_csec = await get_setting(db, ZOHO_CLIENT_SECRET_KEY)
+            db_reg = await get_setting(db, ZOHO_REGION_KEY)
+            if db_cid:
+                cid = db_cid
+            if db_csec:
+                csec = db_csec
+            if db_reg:
+                reg = db_reg
+        except Exception:
+            pass
+    return cid, csec, reg
+
+
+async def save_zoho_oauth_credentials(
+    db: AsyncSession,
+    client_id: str,
+    client_secret: str,
+    region: str = "com",
+) -> None:
+    """Save Zoho OAuth credentials to database and refresh in-memory settings."""
+    await put_setting(db, ZOHO_CLIENT_ID_KEY, client_id)
+    if client_secret:
+        await put_setting(db, ZOHO_CLIENT_SECRET_KEY, client_secret)
+    await put_setting(db, ZOHO_REGION_KEY, region)
+    await db.flush()
+    settings.zoho_client_id = client_id
+    if client_secret:
+        settings.zoho_client_secret = client_secret
+    settings.zoho_region = region
+    log.info("Zoho OAuth credentials updated")
+
+
 # Scheduled / destination backup (PostgreSQL dumps) ---------------------------
 
 BACKUP_SCHEDULE_ENABLED_KEY = "backup_schedule_enabled"

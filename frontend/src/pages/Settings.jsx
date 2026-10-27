@@ -38,6 +38,7 @@ const SECTIONS_BY_TAB = {
   ],
   setup: [
     { id: 'gmail-sync', label: 'Gmail sync' },
+    { id: 'zoho-oauth', label: 'Zoho Mail OAuth' },
     { id: 'backup-restore', label: 'Backup & restore' },
   ],
   features: [
@@ -300,6 +301,10 @@ export default function Settings() {
   const [currentIp, setCurrentIp] = useState('');
   const [newIpAddress, setNewIpAddress] = useState('');
 
+  // Zoho Mail OAuth
+  const [zohoSettings, setZohoSettings] = useState({ client_id: '', client_secret: '', region: 'com', configured: false, redirect_uri: '' });
+  const [zohoSaving, setZohoSaving] = useState(false);
+
   const [activeTab, setActiveTab] = useState('general');
   const tabContentRef = useRef(null);
   const [activeSectionDomId, setActiveSectionDomId] = useState('');
@@ -381,6 +386,15 @@ export default function Settings() {
         }
       }
       setMcpSetup(mcpData || null);
+      api.get('/zoho/status').then(d => {
+        setZohoSettings({
+          client_id: d.client_id || '',
+          client_secret: d.has_secret ? '••••••••••••••••' : '',
+          region: d.region || 'com',
+          configured: !!d.configured,
+          redirect_uri: d.redirect_uri || '',
+        });
+      }).catch(() => {});
     } catch {}
   }, [user]);
 
@@ -1243,6 +1257,107 @@ export default function Settings() {
               }}
             >
               {gmailSyncSaving ? 'Saving…' : 'Save'}
+            </Button>
+          </div>
+        </section>
+
+        {/* ──────────────── Zoho Mail OAuth ──────────────── */}
+        <section id="settings-zoho-oauth" className="mb-10 scroll-mt-6">
+          <h2 className="text-lg font-semibold mb-1 border-b pb-2 dark:border-gray-700">Zoho Mail OAuth</h2>
+          <p className="text-xs text-gray-500 dark:text-gray-400 mb-4">
+            Configure Zoho credentials for 1-click native Zoho Mail inbox connection.
+            Alternatively, you can set <code className="bg-gray-100 dark:bg-gray-800 rounded px-1">ZOHO_CLIENT_ID</code> and <code className="bg-gray-100 dark:bg-gray-800 rounded px-1">ZOHO_CLIENT_SECRET</code> in your environment.
+          </p>
+
+          <div className="space-y-4">
+            {/* Redirect URI */}
+            <div>
+              <label className="block text-sm font-medium mb-1">Authorized Redirect URI</label>
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  readOnly
+                  className="flex-1 border rounded-lg px-3 py-2 text-sm font-mono bg-gray-50 dark:bg-gray-800 focus:outline-none"
+                  value={zohoSettings.redirect_uri || (window.location.origin + '/oauth/zoho/callback')}
+                />
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => {
+                    navigator.clipboard.writeText(zohoSettings.redirect_uri || (window.location.origin + '/oauth/zoho/callback'));
+                    notify({ type: 'success', message: 'Zoho Redirect URI copied!' });
+                  }}
+                >
+                  Copy URI
+                </Button>
+              </div>
+              <p className="text-xs text-gray-400 mt-1">
+                Add this Authorized Redirect URI in your <a href="https://api-console.zoho.com" target="_blank" rel="noopener noreferrer" className="underline text-blue-500">Zoho API Console</a> under Client Details.
+              </p>
+            </div>
+
+            {/* Region */}
+            <div>
+              <label className="block text-sm font-medium mb-1">Zoho Account Region</label>
+              <select
+                className="w-full sm:w-64 border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-300 dark:bg-gray-800"
+                value={zohoSettings.region}
+                onChange={e => setZohoSettings(prev => ({ ...prev, region: e.target.value }))}
+              >
+                <option value="com">United States / Global (.com)</option>
+                <option value="eu">Europe (.eu)</option>
+                <option value="in">India (.in)</option>
+                <option value="com.au">Australia (.com.au)</option>
+                <option value="jp">Japan (.jp)</option>
+                <option value="ca">Canada (.ca)</option>
+              </select>
+            </div>
+
+            {/* Client ID */}
+            <div>
+              <label className="block text-sm font-medium mb-1">Client ID</label>
+              <input
+                type="text"
+                className="w-full border rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-teal-300 dark:bg-gray-800"
+                placeholder="1000.XXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+                value={zohoSettings.client_id}
+                onChange={e => setZohoSettings(prev => ({ ...prev, client_id: e.target.value }))}
+              />
+            </div>
+
+            {/* Client Secret */}
+            <div>
+              <label className="block text-sm font-medium mb-1">Client Secret</label>
+              <input
+                type="password"
+                className="w-full border rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-teal-300 dark:bg-gray-800"
+                placeholder={zohoSettings.configured ? "Leave blank to keep existing secret" : "Paste your Zoho Client Secret"}
+                value={zohoSettings.client_secret}
+                onChange={e => setZohoSettings(prev => ({ ...prev, client_secret: e.target.value }))}
+              />
+            </div>
+
+            <Button
+              size="sm"
+              disabled={zohoSaving}
+              onClick={async () => {
+                setZohoSaving(true);
+                try {
+                  const res = await api.post('/zoho/settings', {
+                    client_id: zohoSettings.client_id,
+                    client_secret: zohoSettings.client_secret.includes('••••') ? '' : zohoSettings.client_secret,
+                    region: zohoSettings.region,
+                  });
+                  setZohoSettings(prev => ({ ...prev, configured: res.configured, redirect_uri: res.redirect_uri }));
+                  notify({ type: 'success', message: 'Zoho Mail OAuth settings saved!' });
+                } catch (e) {
+                  notify({ type: 'error', message: e.message });
+                } finally {
+                  setZohoSaving(false);
+                }
+              }}
+            >
+              {zohoSaving ? 'Saving…' : 'Save Zoho Settings'}
             </Button>
           </div>
         </section>

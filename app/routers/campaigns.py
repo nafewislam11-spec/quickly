@@ -1719,6 +1719,14 @@ async def send_test_email(
             select(Office365Account).where(Office365Account.inbox_id == inbox.id)
         )
         office365_account = oa_result.scalar_one_or_none()
+    elif provider == "zoho":
+        from app.models import ZohoAccount
+        za_result = await db.execute(
+            select(ZohoAccount).where(ZohoAccount.inbox_id == inbox.id)
+        )
+        zoho_account = za_result.scalar_one_or_none()
+    else:
+        zoho_account = None
 
     # Get SMTP account if needed (otherwise send_email's SMTP branch
     # returns SendFailure — "No SMTP credentials provided" — and the
@@ -1745,6 +1753,7 @@ async def send_test_email(
             provider=provider or "resend",
             gmail_account=gmail_account,
             office365_account=office365_account,
+            zoho_account=zoho_account,
             smtp_account=smtp_account,
         ),
     )

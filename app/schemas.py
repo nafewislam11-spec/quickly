@@ -6,7 +6,7 @@ from app.models import WEBHOOK_EVENT_TYPES
 
 # Known inbox providers. "resend" is a legacy value still present on old rows
 # (gmail_oauth reverts disconnected Gmail inboxes to it), so it stays allowed.
-INBOX_PROVIDERS = Literal["gmail", "office365", "smtp", "resend"]
+INBOX_PROVIDERS = Literal["gmail", "office365", "zoho", "smtp", "resend"]
 
 
 class LeadCampaignInfo(BaseModel):

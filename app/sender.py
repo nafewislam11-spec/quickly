@@ -37,9 +37,10 @@ except Exception:  # pragma: no cover - optional dependency
 
 from app.settings_manager import settings
 from app import time as time_provider
-from app.models import GmailAccount, Office365Account, SmtpAccount
+from app.models import GmailAccount, Office365Account, SmtpAccount, ZohoAccount
 from app.routers.gmail_oauth import refresh_access_token  # needed for token refresh when sending via gmail
 from app.routers.office365_oauth import refresh_access_token as refresh_office365_token
+from app.routers.zoho_oauth import refresh_access_token as refresh_zoho_token
 
 log = logging.getLogger("quickly.sender")
 
@@ -833,6 +834,10 @@ def send_email(
     conversation_id: Optional[str] = None,
     reply_graph_message_id: Optional[str] = None,
     smtp_account: Optional[SmtpAccount] = None,
+    zoho_account: Optional[ZohoAccount] = None,
+    zoho_client_id: str = "",
+    zoho_client_secret: str = "",
+    zoho_region: str = "",
 ) -> Optional[SendResult | SendFailure]:
     """Send one email via Gmail API or Microsoft Graph API.
 
@@ -906,6 +911,27 @@ def send_email(
             office365_client_secret=office365_client_secret,
             office365_tenant_id=office365_tenant_id,
             reply_graph_message_id=reply_graph_message_id,
+        )
+
+    if provider == "zoho":
+        if not zoho_account:
+            log.error("send_email: no Zoho credentials for %s", from_email)
+            return SendFailure(error_type="auth_failed", message="No Zoho credentials provided")
+        return _send_via_zoho(
+            to_email=to_email,
+            subject=subject,
+            body=body,
+            from_email=from_email,
+            from_name=from_name,
+            reply_to_msg_id=reply_to_msg_id,
+            references=references,
+            is_html=is_html,
+            zoho_account=zoho_account,
+            zoho_client_id=zoho_client_id,
+            zoho_client_secret=zoho_client_secret,
+            zoho_region=zoho_region,
+            list_unsubscribe_url=list_unsubscribe_url,
+            list_unsubscribe_one_click=list_unsubscribe_one_click,
         )
 
     # Default: Gmail
@@ -1197,6 +1223,186 @@ def _send_via_office365(
             error=str(e),
         )
         log.error("Office 365 Graph API error: %s", e)
+        return None
+
+
+# ---- Zoho Mail sending ----
+
+_ZOHO_LOG_PATH = _LOG_DIR / "zoho_api.log"
+
+
+def _log_zoho_call(
+    to_email: str,
+    from_email: str,
+    subject: str,
+    status: str = "SENDING",
+    response: str = "",
+    error: Optional[str] = None,
+) -> None:
+    entry = {
+        "timestamp": time_provider.utcnow().isoformat() + "Z",
+        "to": to_email,
+        "from": from_email,
+        "subject": subject,
+        "status": status,
+    }
+    if response:
+        entry["response"] = response
+    if error:
+        entry["error"] = error
+    try:
+        with open(_ZOHO_LOG_PATH, "a") as f:
+            f.write(json.dumps(entry) + "\n")
+    except Exception:
+        log.warning("Could not write to zoho log file at %s", _ZOHO_LOG_PATH)
+
+
+def _send_via_zoho(
+    to_email: str,
+    subject: str,
+    body: str,
+    from_email: str,
+    from_name: str = "",
+    reply_to_msg_id: Optional[str] = None,
+    references: Optional[str] = None,
+    is_html: bool = False,
+    zoho_account: ZohoAccount | None = None,
+    zoho_client_id: str = "",
+    zoho_client_secret: str = "",
+    zoho_region: str = "",
+    list_unsubscribe_url: Optional[str] = None,
+    list_unsubscribe_one_click: bool = True,
+    retry_on_auth_fail: bool = True,
+) -> Optional[SendResult | SendFailure]:
+    """Send one email via Zoho Mail REST API."""
+    if not zoho_account:
+        log.error("Zoho send: no account provided for %s", from_email)
+        return SendFailure(error_type="auth_failed", message="No Zoho account provided")
+
+    access_token = zoho_account.access_token
+    if not access_token:
+        log.error("Zoho send: no access token for %s", from_email)
+        return None
+
+    region = zoho_region or zoho_account.region or settings.zoho_region or "com"
+    account_id = zoho_account.zoho_account_id
+    api_domain = zoho_account.api_domain or f"https://mail.zoho.{region}"
+    send_url = f"{api_domain.rstrip('/')}/api/accounts/{account_id}/messages"
+
+    payload: dict[str, Any] = {
+        "fromAddress": from_email,
+        "toAddress": to_email,
+        "subject": subject,
+        "content": body,
+        "mailFormat": "html" if is_html else "plaintext",
+        "askReceipt": "no",
+    }
+    clean_in_reply_to = ""
+    if reply_to_msg_id:
+        clean_in_reply_to = reply_to_msg_id.strip("<>")
+        payload["action"] = "reply"
+        payload["inReplyTo"] = clean_in_reply_to
+
+    req_data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        send_url,
+        data=req_data,
+        headers={
+            "Authorization": f"Zoho-oauthtoken {access_token}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+
+    _log_zoho_call(to_email, from_email, subject, status="SENDING")
+
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            resp_bytes = resp.read()
+            resp_json = json.loads(resp_bytes.decode("utf-8"))
+
+            data_obj = resp_json.get("data", {})
+            message_id = ""
+            if isinstance(data_obj, dict):
+                message_id = data_obj.get("messageId") or data_obj.get("msgId") or ""
+            elif isinstance(data_obj, list) and len(data_obj) > 0:
+                first = data_obj[0]
+                if isinstance(first, dict):
+                    message_id = first.get("messageId") or first.get("msgId") or ""
+
+            if not message_id:
+                message_id = make_msgid(domain=f"zoho.{region}")
+            elif not message_id.startswith("<"):
+                message_id = f"<{message_id}>"
+
+            _log_zoho_call(
+                to_email, from_email, subject,
+                status="200 OK",
+                response=resp_bytes.decode("utf-8")[:500],
+            )
+            log.info("Zoho Mail API: sent to=%s message_id=%s", to_email, message_id)
+            return SendResult(
+                message_id=message_id,
+                thread_id=f"zoho-{clean_in_reply_to}" if reply_to_msg_id else f"zoho-{message_id.strip('<>')}",
+                gmail_message_id=None,
+            )
+    except urllib.error.HTTPError as e:
+        err_body = ""
+        try:
+            err_body = e.read().decode("utf-8")
+        except Exception:
+            pass
+        status_code = e.code
+        _log_zoho_call(
+            to_email, from_email, subject,
+            status=f"ERROR {status_code}",
+            error=err_body[:500],
+        )
+        log.error("Zoho Mail API error %s: %s", status_code, err_body[:300])
+
+        if status_code in (401, 403):
+            if retry_on_auth_fail and zoho_account.refresh_token:
+                _cid = zoho_client_id or settings.zoho_client_id
+                _csec = zoho_client_secret or settings.zoho_client_secret
+                _reg = zoho_region or zoho_account.region or settings.zoho_region or "com"
+                refreshed = refresh_zoho_token(zoho_account, _cid, _csec, _reg)
+                if refreshed:
+                    return _send_via_zoho(
+                        to_email=to_email,
+                        subject=subject,
+                        body=body,
+                        from_email=from_email,
+                        from_name=from_name,
+                        reply_to_msg_id=reply_to_msg_id,
+                        references=references,
+                        is_html=is_html,
+                        zoho_account=zoho_account,
+                        zoho_client_id=zoho_client_id,
+                        zoho_client_secret=zoho_client_secret,
+                        zoho_region=zoho_region,
+                        list_unsubscribe_url=list_unsubscribe_url,
+                        list_unsubscribe_one_click=list_unsubscribe_one_click,
+                        retry_on_auth_fail=False,
+                    )
+            err_type = "auth_failed" if status_code == 401 else "permission_denied"
+            return SendFailure(
+                error_type=err_type,
+                message=f"Zoho auth/permission error ({status_code}): {err_body[:300]}",
+            )
+        if status_code == 400:
+            return SendFailure(
+                error_type="bounce",
+                message=f"Zoho rejected message (400): {err_body[:300]}",
+            )
+        if status_code == 404:
+            return SendFailure(
+                error_type="invalid_recipient",
+                message=f"Zoho resource not found (404): {err_body[:300]}",
+            )
+        return None
+    except Exception as e:
+        _log_zoho_call(to_email, from_email, subject, status="ERROR", error=str(e))
+        log.error("Zoho Mail send error: %s", e)
         return None
 
 

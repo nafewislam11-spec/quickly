@@ -33,6 +33,7 @@ from app.models import (
     LeadReply,
     GmailAccount,
     Office365Account,
+    ZohoAccount,
     LeadUnsubscribeToken,
     GmailMessage,
     Office365Message,
@@ -41,7 +42,7 @@ from app.models import (
 from app.sender import send_email, render_body, get_lead_data, RenderContext, SendResult, SendFailure, build_quote_html, build_quote_plain, _plain_to_quoted_html, _strip_html_tags
 from app.email_html import normalize_email_html
 from app.webhooks import fire_webhook_event
-from app.app_settings import get_google_oauth_credentials, get_office365_oauth_credentials
+from app.app_settings import get_google_oauth_credentials, get_office365_oauth_credentials, get_zoho_oauth_credentials
 from app import time as time_provider
 from app.queue_logic import _parse_time, compute_effective_daily_limit
 from app.campaign_lead_status import campaign_lead_may_receive_sends
@@ -203,6 +204,8 @@ async def run_send_job():
         g_client_id, g_client_secret = await get_google_oauth_credentials(session)
         # Pre-fetch Office 365 OAuth credentials once for all O365 inboxes
         o365_client_id, o365_client_secret, o365_tenant_id = await get_office365_oauth_credentials(session)
+        # Pre-fetch Zoho OAuth credentials once for all Zoho inboxes
+        zoho_client_id, zoho_client_secret, zoho_region = await get_zoho_oauth_credentials(session)
 
         # Fallback tracking base URL (used when an inbox has no custom domain)
         from app.settings_manager import settings as _settings
@@ -300,6 +303,7 @@ async def run_send_job():
             gmail_token = ""
             ga = None
             o365_account = None
+            zoho_account = None
             smtp_account = None
             simulate_send = False
 
@@ -310,6 +314,14 @@ async def run_send_job():
                 o365_account = o365_res.scalar_one_or_none()
                 if o365_account is None:
                     log.warning("Office 365 inbox %s (%s) has no Office365Account — skipping", inbox.id, inbox.email)
+                    continue
+            elif inbox.provider == "zoho":
+                zoho_res = await session.execute(
+                    select(ZohoAccount).where(ZohoAccount.inbox_id == inbox.id)
+                )
+                zoho_account = zoho_res.scalar_one_or_none()
+                if zoho_account is None:
+                    log.warning("Zoho inbox %s (%s) has no ZohoAccount — skipping", inbox.id, inbox.email)
                     continue
             elif inbox.provider == "smtp":
                 from app.models import SmtpAccount as _SmtpAccount
@@ -883,6 +895,10 @@ async def run_send_job():
                             conversation_id=prev_thread_id if inbox.provider == "office365" else None,
                             reply_graph_message_id=reply_graph_message_id if inbox.provider == "office365" else None,
                             smtp_account=smtp_account,
+                            zoho_account=zoho_account,
+                            zoho_client_id=zoho_client_id,
+                            zoho_client_secret=zoho_client_secret,
+                            zoho_region=zoho_region,
                         )
                     except Exception:
                         # ``send_email`` handles the expected failures itself,
@@ -1261,10 +1277,12 @@ async def send_slot_job(slot_id: int) -> None:
         # ── OAuth credentials ────────────────────────────────────────────
         g_client_id, g_client_secret = await get_google_oauth_credentials(session)
         o365_client_id, o365_client_secret, o365_tenant_id = await get_office365_oauth_credentials(session)
+        zoho_client_id, zoho_client_secret, zoho_region = await get_zoho_oauth_credentials(session)
 
         gmail_token = ""
         ga = None
         o365_account = None
+        zoho_account = None
         smtp_account = None
         simulate_send = False
 
@@ -1281,6 +1299,17 @@ async def send_slot_job(slot_id: int) -> None:
             if o365_account is None:
                 log.warning(
                     "send_slot_job: O365 inbox %s has no Office365Account – skipping slot %d",
+                    inbox.email, slot_id,
+                )
+                return
+        elif inbox.provider == "zoho":
+            zoho_res = await session.execute(
+                select(ZohoAccount).where(ZohoAccount.inbox_id == inbox.id)
+            )
+            zoho_account = zoho_res.scalar_one_or_none()
+            if zoho_account is None:
+                log.warning(
+                    "send_slot_job: Zoho inbox %s has no ZohoAccount – skipping slot %d",
                     inbox.email, slot_id,
                 )
                 return
@@ -1695,6 +1724,10 @@ async def send_slot_job(slot_id: int) -> None:
                     conversation_id=prev_thread_id if inbox.provider == "office365" else None,
                     reply_graph_message_id=reply_graph_message_id if inbox.provider == "office365" else None,
                     smtp_account=smtp_account,
+                    zoho_account=zoho_account,
+                    zoho_client_id=zoho_client_id,
+                    zoho_client_secret=zoho_client_secret,
+                    zoho_region=zoho_region,
                 )
             except Exception:
                 # Unexpected error from send_email: the pre-created EmailLog row
