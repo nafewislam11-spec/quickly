@@ -75,6 +75,16 @@ INVALID_UNSUBSCRIBE_HTML = "<p>Invalid or expired unsubscribe link.</p>"
 async def is_known_ip(db: AsyncSession, ip: str | None) -> bool:
     if not ip:
         return False
+
+    from app.settings_manager import settings
+    if getattr(settings, "test_mode", False):
+        return False
+
+    from app.app_settings import get_setting
+    filter_enabled = await get_setting(db, "filter_known_ips")
+    if filter_enabled is not None and filter_enabled.strip().lower() in ("false", "0", "no", "off"):
+        return False
+
     now = time_provider.utcnow()
     result = await db.execute(
         select(KnownIP).where(

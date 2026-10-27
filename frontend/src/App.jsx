@@ -39,7 +39,13 @@ function AppRoutes() {
   // Register this browser's IP as a known IP (auto-expires after 1 week)
   useEffect(() => {
     if (user) {
-      api.post('/settings/known-ips/heartbeat', {}).catch(() => {});
+      api.get('/settings/filter-known-ips').then(res => {
+        if (res.enabled !== false) {
+          api.post('/settings/known-ips/heartbeat', {}).catch(() => {});
+        }
+      }).catch(() => {
+        api.post('/settings/known-ips/heartbeat', {}).catch(() => {});
+      });
     }
   }, [user]);
 

@@ -889,6 +889,26 @@ class _KnownIPCreate(_BaseModel):
     permanent: bool = True
 
 
+class _FilterKnownIPsUpdate(_BaseModel):
+    enabled: bool
+
+
+@router.get("/filter-known-ips")
+async def get_filter_known_ips(db: AsyncSession = Depends(get_db)):
+    from app.app_settings import get_setting
+    val = await get_setting(db, "filter_known_ips")
+    enabled = True if val is None else val.strip().lower() in ("true", "1", "yes", "on")
+    return {"enabled": enabled}
+
+
+@router.post("/filter-known-ips")
+async def set_filter_known_ips(payload: _FilterKnownIPsUpdate, db: AsyncSession = Depends(get_db)):
+    from app.app_settings import put_setting
+    await put_setting(db, "filter_known_ips", "true" if payload.enabled else "false")
+    await db.commit()
+    return {"ok": True, "enabled": payload.enabled}
+
+
 @router.get("/known-ips")
 async def list_known_ips(
     request: Request,
@@ -896,6 +916,10 @@ async def list_known_ips(
 ):
     """Return all known IPs with a flag identifying the caller's current IP."""
     from app import time as _time
+    from app.app_settings import get_setting
+    val = await get_setting(db, "filter_known_ips")
+    filter_enabled = True if val is None else val.strip().lower() in ("true", "1", "yes", "on")
+
     now = _time.utcnow()
     result = await db.execute(select(KnownIP).order_by(KnownIP.last_seen_at.desc()))
     rows = result.scalars().all()
@@ -913,7 +937,7 @@ async def list_known_ips(
             "last_seen_at": r.last_seen_at.isoformat() + "Z" if r.last_seen_at else None,
             "expires_at": r.expires_at.isoformat() + "Z" if r.expires_at else None,
         })
-    return {"known_ips": out, "current_ip": caller_ip}
+    return {"known_ips": out, "current_ip": caller_ip, "filter_enabled": filter_enabled}
 
 
 @router.post("/known-ips", status_code=201)

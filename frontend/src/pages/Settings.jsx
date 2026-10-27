@@ -300,6 +300,7 @@ export default function Settings() {
   const [knownIpsOpen, setKnownIpsOpen] = useState(false);
   const [currentIp, setCurrentIp] = useState('');
   const [newIpAddress, setNewIpAddress] = useState('');
+  const [filterKnownIps, setFilterKnownIps] = useState(true);
 
   // Zoho Mail OAuth
   const [zohoSettings, setZohoSettings] = useState({ client_id: '', client_secret: '', region: 'com', configured: false, redirect_uri: '' });
@@ -345,6 +346,7 @@ export default function Settings() {
       setAiProviders(provData.providers || []);
       setKnownIps(ipData.known_ips || []);
       setCurrentIp(ipData.current_ip || '');
+      setFilterKnownIps(ipData.filter_enabled !== false);
       setApiKeys(keysData || []);
       if (notifData) {
         setNotifConfig(notifData);
@@ -993,10 +995,32 @@ export default function Settings() {
         </section>
 
         <section id="settings-known-ips" className="mb-10 scroll-mt-6">
-          <h2 className="text-lg font-semibold mb-2 border-b border-gray-200 dark:border-gray-700 pb-2">Known IPs</h2>
-          <p className="text-xs text-gray-500 dark:text-gray-400 mb-3">
-            Opens and clicks from these IPs are ignored for self-open filtering.
-          </p>
+          <h2 className="text-lg font-semibold mb-2 border-b border-gray-200 dark:border-gray-700 pb-2">Known IPs & Self-Tracking</h2>
+          <div className="mb-3">
+            <label className="flex items-center gap-2 cursor-pointer text-sm font-medium">
+              <input
+                type="checkbox"
+                checked={filterKnownIps}
+                onChange={async (e) => {
+                  const val = e.target.checked;
+                  setFilterKnownIps(val);
+                  try {
+                    await api.post('/settings/filter-known-ips', { enabled: val });
+                    notify(val ? 'Self-open/click filtering enabled' : 'Self-filtering disabled: your own clicks will now be tracked!', 'success');
+                  } catch (err) {
+                    notify(err.message, 'error');
+                  }
+                }}
+              />
+              <span>Filter self-opens and self-clicks from Known IPs</span>
+            </label>
+            <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+              {filterKnownIps
+                ? 'Opens and clicks from your admin IP are ignored so your metrics stay clean. Uncheck this when testing your campaign email links!'
+                : 'Filtering is DISABLED: opens and clicks from your browser/computer will be tracked normally (perfect for testing).'
+              }
+            </p>
+          </div>
           <Button size="sm" variant="outline" onClick={() => setKnownIpsOpen(true)}>
             Manage Known IPs
           </Button>

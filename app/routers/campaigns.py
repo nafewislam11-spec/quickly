@@ -1931,6 +1931,7 @@ async def list_sent_emails(campaign_id: int, db: AsyncSession = Depends(get_db))
         .outerjoin(Inbox, EmailLog.inbox_id == Inbox.id)
         .options(
             _sl(EmailLog.variant),
+            _sl(EmailLog.tracked_links),
         )
         .where(EmailLog.campaign_id == campaign_id)
         .order_by(EmailLog.sent_at.desc())
@@ -1964,6 +1965,10 @@ async def list_sent_emails(campaign_id: int, db: AsyncSession = Depends(get_db))
             "variant_id": el.variant_id,
             "variant_label": (el.variant.label if el.variant else None),
             "inbox_email": inbox.email if inbox else None,
+            "tracked_links": [
+                {"token": tl.token, "original_url": tl.original_url}
+                for tl in (getattr(el, "tracked_links", []) or [])
+            ],
         }
         for el, lead, cl, inbox in rows
     ]
