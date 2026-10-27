@@ -9,7 +9,10 @@ from __future__ import annotations
 # // must also be reflected in the Beacon service (/beacon or the separate Beacon repo).
 # // If you are an AI agent, add a TODO at the end of your response listing what needs to be updated in Beacon.
 
+import functools
+import ipaddress
 import logging
+import socket
 from typing import TYPE_CHECKING
 
 from sqlalchemy import delete, select
@@ -109,40 +112,92 @@ async def resolve_email_log_for_open(db: AsyncSession, token: str) -> EmailLog |
     return email_log
 
 
+_APPLE_AND_RELAY_NETS = [
+    ipaddress.ip_network("17.0.0.0/8"),       # Apple Inc. ASN 714
+    ipaddress.ip_network("104.28.0.0/16"),     # Cloudflare Apple iCloud Private Relay / WARP
+    ipaddress.ip_network("104.29.0.0/16"),     # Cloudflare Apple iCloud Private Relay
+    ipaddress.ip_network("140.248.0.0/16"),    # Fastly Apple Private Relay
+    ipaddress.ip_network("143.244.32.0/19"),   # Apple Cloud Relay
+    ipaddress.ip_network("143.244.64.0/19"),   # Apple Cloud Relay
+    ipaddress.ip_network("146.75.0.0/16"),     # Fastly Apple Private Relay
+    ipaddress.ip_network("151.101.0.0/16"),    # Fastly Apple Private Relay
+    ipaddress.ip_network("199.232.0.0/16"),    # Fastly Apple Private Relay
+    ipaddress.ip_network("64.252.64.0/18"),    # Apple Cloud Relay
+    ipaddress.ip_network("198.54.128.0/18"),   # Apple Cloud Relay
+]
+
+
+@functools.lru_cache(maxsize=1024)
+def is_apple_relay_ptr(ip: str) -> bool:
+    """Check reverse DNS PTR record for Apple or iCloud relay hostnames."""
+    try:
+        host = socket.gethostbyaddr(ip)[0].lower()
+        return any(k in host for k in ("apple", "icloud", "aaplimg"))
+    except Exception:
+        return False
+
+
+def is_apple_or_scanner_ip(ip: str | None) -> bool:
+    """Detect Apple Inc. ASN (17.0.0.0/8) and Apple Private Relay / MPP IP ranges."""
+    if not ip:
+        return False
+    try:
+        addr = ipaddress.ip_address(ip)
+        for net in _APPLE_AND_RELAY_NETS:
+            if addr in net:
+                return True
+    except ValueError:
+        pass
+    return False
+
+
+def is_prefetch_header(headers: dict[str, str] | None) -> bool:
+    """Detect explicit prefetch or preview intent declared in request headers."""
+    if not headers:
+        return False
+    for key in ("purpose", "sec-purpose", "x-purpose", "x-moz"):
+        val = headers.get(key, "").strip().lower()
+        if "prefetch" in val or "preview" in val:
+            return True
+    return False
+
+
 def is_bot_user_agent(ua: str | None) -> bool:
     """Detect Apple Mail Privacy Protection (MPP) proxy or automated security bots."""
     if not ua:
         return False
     ua_clean = ua.strip()
     ua_lower = ua_clean.lower()
-    # Apple Mail Privacy Protection (MPP) signature: exact "Mozilla/5.0"
+
+    # Exact generic signatures (Apple MPP and simple bots)
     if ua_clean in ("Mozilla/5.0", "Mozilla/5.0 ()", "Mozilla/4.0") or ua_lower == "mozilla/5.0":
         return True
+
+    # Apple MPP stripped WebKit proxy signature:
+    # Apple strips Version/X.X and Safari/X.X when proxying image fetches
+    if "applewebkit" in ua_lower:
+        # If it has Mac OS X but NO Version/ and NO Safari/
+        if "macintosh" in ua_lower and "version/" not in ua_lower and "safari/" not in ua_lower:
+            return True
+        # If it has Windows NT but NO Chrome/ and NO Safari/ and NO Firefox/
+        if "windows nt" in ua_lower and "chrome/" not in ua_lower and "firefox/" not in ua_lower and "safari/" not in ua_lower:
+            return True
+        # If it has neither standard browser tokens nor mobile token
+        if not any(t in ua_lower for t in ("version/", "safari/", "chrome/", "firefox/", "edg/", "mobile/")):
+            return True
+
     bot_keywords = (
         "bot", "spider", "crawl", "scan", "barracuda", "proofpoint",
-        "mimecast", "trend micro", "sophos", "fireeye", "symantec",
-        "postman", "curl", "python-requests", "aiohttp", "urllib",
-        "wget", "headless", "phantomjs", "virus", "mailscanner",
-        "applebot", "safebrowsing"
+        "mimecast", "trend micro", "trendmicro", "sophos", "fireeye",
+        "symantec", "postman", "curl", "python-requests", "aiohttp",
+        "urllib", "httpx", "wget", "headless", "phantomjs", "virus",
+        "mailscanner", "applebot", "apple-mail", "safebrowsing",
+        "safelinks", "preview", "validator", "check_http"
     )
     return any(kw in ua_lower for kw in bot_keywords)
 
 
-def is_apple_or_scanner_ip(ip: str | None) -> bool:
-    """Detect Apple Inc. ASN IP ranges (17.0.0.0/8) used by Apple Mail proxy cache."""
-    if not ip:
-        return False
-    import ipaddress
-    try:
-        addr = ipaddress.ip_address(ip)
-        if addr in ipaddress.ip_network("17.0.0.0/8"):
-            return True
-    except ValueError:
-        pass
-    return False
-
-
-def is_immediate_prefetch(sent_at: datetime | None, min_seconds: int = 10) -> bool:
+def is_immediate_prefetch(sent_at: datetime | None, min_seconds: int = 20) -> bool:
     """Detect instant pre-fetch opens that occur faster than humanly possible."""
     if not sent_at:
         return False
@@ -150,7 +205,7 @@ def is_immediate_prefetch(sent_at: datetime | None, min_seconds: int = 10) -> bo
     s = sent_at.replace(tzinfo=None) if sent_at.tzinfo else sent_at
     n = now.replace(tzinfo=None) if now.tzinfo else now
     elapsed = (n - s).total_seconds()
-    return 0 <= elapsed < min_seconds
+    return elapsed < min_seconds
 
 
 async def record_email_open(
@@ -158,6 +213,7 @@ async def record_email_open(
     token: str,
     ip: str | None,
     user_agent: str | None = None,
+    headers: dict[str, str] | None = None,
 ) -> bool:
     """Persist open event if applicable. Returns True if an open was recorded."""
     email_log = await resolve_email_log_for_open(db, token)
@@ -173,14 +229,29 @@ async def record_email_open(
         filter_bot_opens = await get_setting(db, "filter_bot_opens")
         # Enabled by default
         if filter_bot_opens is None or filter_bot_opens.strip().lower() in ("true", "1", "yes", "on"):
+            # 1. Explicit prefetch headers
+            if is_prefetch_header(headers):
+                log.info("open: ignoring explicit prefetch header for log_id=%s", email_log.id)
+                return False
+
+            # 2. Timing heuristic: 0 to 20 seconds pre-fetch window
+            if is_immediate_prefetch(email_log.sent_at, min_seconds=20):
+                log.info("open: ignoring immediate pre-fetch (<20s) for log_id=%s", email_log.id)
+                return False
+
+            # 3. User-Agent detection (Apple MPP stripped WebKit / bot signatures)
             if is_bot_user_agent(user_agent):
                 log.info("open: ignoring bot User-Agent %r for log_id=%s", user_agent, email_log.id)
                 return False
+
+            # 4. Apple Inc. (17.0.0.0/8) and Apple Private Relay CIDRs
             if is_apple_or_scanner_ip(ip):
                 log.info("open: ignoring Apple MPP / scanner IP %s for log_id=%s", ip, email_log.id)
                 return False
-            if user_agent is not None and is_immediate_prefetch(email_log.sent_at, min_seconds=10):
-                log.info("open: ignoring immediate pre-fetch (<10s) for log_id=%s", email_log.id)
+
+            # 5. Reverse DNS check if User-Agent indicates Apple
+            if user_agent and "apple" in user_agent.lower() and ip and is_apple_relay_ptr(ip):
+                log.info("open: ignoring Apple relay PTR for ip=%s log_id=%s", ip, email_log.id)
                 return False
 
     if not email_log.opened:

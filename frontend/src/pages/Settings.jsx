@@ -1044,7 +1044,7 @@ export default function Settings() {
               <span>Filter Apple Mail Privacy Protection (MPP) & automated bot opens</span>
             </label>
             <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
-              Ignores fake pre-fetch opens from Apple Mail proxy servers (17.0.0.0/8), generic scanner User-Agents (e.g. Mozilla/5.0), and instant pre-fetch opens within 10 seconds of delivery.
+              Ignores fake pre-fetch opens from Apple Mail proxy servers (17.0.0.0/8 & Apple Private Relay), stripped WebKit/bot User-Agents (e.g. Mozilla/5.0), prefetch headers, and instant pre-fetch opens within 20 seconds of delivery.
             </p>
           </div>
 
