@@ -1295,29 +1295,22 @@ def _send_via_zoho(
     mail_base = _get_mail_api_url(region)
     send_url = f"{mail_base}/api/accounts/{account_id}/messages"
 
-    formatted_from = (
+    from_addr = (
         f'"{from_name.strip()}" <{from_email.strip()}>'
         if from_name and from_name.strip()
         else from_email.strip()
     )
 
-    # In Zoho Webmail, the field is literally "from": "\"Name\" <email>"
-    # In Zoho REST API /messages, "fromAddress" is the email address.
-    # We pass both "fromAddress" and "from", as well as "fromName", "displayName",
-    # and "senderName" so the full RFC 5322 display name is always honored.
+    # Zoho REST API strictly enforces JSON schema (disallowing extra keys like 'from' or 'fromName'),
+    # but accepts full RFC 5322 format '"Display Name" <email@domain.com>' in 'fromAddress'.
     payload: dict[str, Any] = {
-        "fromAddress": from_email.strip(),
-        "from": formatted_from,
+        "fromAddress": from_addr,
         "toAddress": to_email,
         "subject": subject,
         "content": body,
         "mailFormat": "html" if is_html else "plaintext",
         "askReceipt": "no",
     }
-    if from_name and from_name.strip():
-        payload["fromName"] = from_name.strip()
-        payload["displayName"] = from_name.strip()
-        payload["senderName"] = from_name.strip()
 
     clean_in_reply_to = ""
     if reply_to_msg_id:
