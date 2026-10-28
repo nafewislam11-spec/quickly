@@ -2365,6 +2365,7 @@ async def list_unibox_conversations(
     page_size: int,
     leads_only: bool = False,
     lead_status: str | None = None,
+    user_id: int | None = None,
 ) -> dict[str, Any]:
     offset = (page - 1) * page_size
 
@@ -2448,6 +2449,8 @@ async def list_unibox_conversations(
             ),
         )
     )
+    if user_id is not None:
+        gmail_stmt = gmail_stmt.where(Inbox.user_id == user_id)
     if leads_only:
         gmail_stmt = gmail_stmt.where(or_(GmailThread.is_lead_thread.is_(True), lead_sq.c.lead_id.isnot(None)))
     if lead_status:
@@ -2502,6 +2505,8 @@ async def list_unibox_conversations(
             ),
         )
     )
+    if user_id is not None:
+        o365_stmt = o365_stmt.where(Inbox.user_id == user_id)
     if leads_only:
         o365_stmt = o365_stmt.where(or_(Office365Thread.is_lead_thread.is_(True), lead_sq.c.lead_id.isnot(None)))
     if lead_status:
@@ -2556,6 +2561,8 @@ async def list_unibox_conversations(
             ),
         )
     )
+    if user_id is not None:
+        smtp_stmt = smtp_stmt.where(Inbox.user_id == user_id)
     if leads_only:
         smtp_stmt = smtp_stmt.where(or_(SmtpThread.is_lead_thread.is_(True), lead_sq.c.lead_id.isnot(None)))
     if lead_status:
@@ -2641,17 +2648,31 @@ async def list_unibox_conversations(
     }
 
 
-async def get_notification_count(db: AsyncSession) -> int:
+async def get_notification_count(db: AsyncSession, *, user_id: int | None = None) -> int:
     """Return the number of threads with an unread lead reply (Gmail + Office 365 + SMTP)."""
-    gmail_stmt = select(func.count()).select_from(GmailThread).where(
-        GmailThread.unread_lead_reply.is_(True)
+    gmail_stmt = (
+        select(func.count())
+        .select_from(GmailThread)
+        .join(Inbox, Inbox.id == GmailThread.inbox_id)
+        .where(GmailThread.unread_lead_reply.is_(True))
     )
-    o365_stmt = select(func.count()).select_from(Office365Thread).where(
-        Office365Thread.unread_lead_reply.is_(True)
+    o365_stmt = (
+        select(func.count())
+        .select_from(Office365Thread)
+        .join(Inbox, Inbox.id == Office365Thread.inbox_id)
+        .where(Office365Thread.unread_lead_reply.is_(True))
     )
-    smtp_stmt = select(func.count()).select_from(SmtpThread).where(
-        SmtpThread.unread_lead_reply.is_(True)
+    smtp_stmt = (
+        select(func.count())
+        .select_from(SmtpThread)
+        .join(Inbox, Inbox.id == SmtpThread.inbox_id)
+        .where(SmtpThread.unread_lead_reply.is_(True))
     )
+    if user_id is not None:
+        gmail_stmt = gmail_stmt.where(Inbox.user_id == user_id)
+        o365_stmt = o365_stmt.where(Inbox.user_id == user_id)
+        smtp_stmt = smtp_stmt.where(Inbox.user_id == user_id)
+
     gmail_count = int((await db.execute(gmail_stmt)).scalar_one() or 0)
     o365_count = int((await db.execute(o365_stmt)).scalar_one() or 0)
     smtp_count = int((await db.execute(smtp_stmt)).scalar_one() or 0)

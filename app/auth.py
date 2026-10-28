@@ -202,6 +202,10 @@ async def resolve_current_user(
     if not user or not user.is_active:
         raise HTTPException(status_code=401, detail="User not found or disabled")
 
+    try:
+        request.state.user = user
+    except Exception:
+        pass
     return user
 
 
@@ -221,7 +225,22 @@ async def get_current_user(
 
     Returns the User ORM object. Raises 401 if unauthenticated.
     """
-    return await resolve_current_user(request, db, credentials)
+    user = await resolve_current_user(request, db, credentials)
+    try:
+        request.state.user = user
+    except Exception:
+        pass
+    return user
+
+
+def get_user_id(request: Request, current_user: Optional[User] = None) -> int:
+    """Return the current user ID, falling back to 1 for backwards compatibility or tests."""
+    if current_user is not None and getattr(current_user, "id", None):
+        return current_user.id
+    req_user = getattr(request.state, "user", None)
+    if req_user is not None and getattr(req_user, "id", None):
+        return req_user.id
+    return 1
 
 
 async def require_admin_short_session(

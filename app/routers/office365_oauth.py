@@ -101,10 +101,11 @@ async def office365_authorize(
     # CSRF nonce
     from app.time import utcnow
     csrf_token = secrets.token_urlsafe(32)
+    target_user_id = getattr(_user, "id", None) or 1
     csrf_state = OAuthState(
         state_token=csrf_token,
         purpose="inbox_microsoft",
-        metadata_json=json.dumps({"display_name": display_name, "max_per_day": max_per_day, "ramp_up_enabled": ramp_up_enabled, "ramp_up_start": ramp_up_start, "ramp_up_step_size": ramp_up_step_size}),
+        metadata_json=json.dumps({"display_name": display_name, "max_per_day": max_per_day, "ramp_up_enabled": ramp_up_enabled, "ramp_up_start": ramp_up_start, "ramp_up_step_size": ramp_up_step_size, "user_id": target_user_id}),
         expires_at=utcnow() + timedelta(minutes=10),
     )
     db.add(csrf_state)
@@ -116,6 +117,7 @@ async def office365_authorize(
         "ramp_up_enabled": ramp_up_enabled,
         "ramp_up_start": ramp_up_start,
         "ramp_up_step_size": ramp_up_step_size,
+        "user_id": target_user_id,
         "_csrf": csrf_token,
     })
 
@@ -206,12 +208,16 @@ async def office365_callback(
     if not user_email:
         raise HTTPException(502, "Failed to get email address from Microsoft")
 
+    target_user_id = int(state_data.get("user_id") or 1)
+
     # Check if inbox already exists for this email
     result = await db.execute(select(Inbox).where(Inbox.email == user_email))
     inbox = result.scalar_one_or_none()
 
     if inbox:
         inbox.provider = "office365"
+        if getattr(inbox, "user_id", None) is None:
+            inbox.user_id = target_user_id
         if display_name:
             inbox.display_name = display_name
 
@@ -236,6 +242,7 @@ async def office365_callback(
             db.add(oa)
     else:
         inbox = Inbox(
+            user_id=target_user_id,
             email=user_email,
             display_name=display_name or user_email.split("@")[0],
             max_emails_per_day=max_per_day,

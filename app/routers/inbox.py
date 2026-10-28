@@ -11,7 +11,8 @@ from datetime import datetime, timedelta
 from urllib.parse import parse_qs, urlparse
 
 import httpx
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
+from app.auth import get_user_id
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, exists, update as sa_update
 
@@ -184,10 +185,12 @@ async def _attach_smtp_health(db: AsyncSession, inboxes: list[Inbox]) -> None:
 
 
 @router.get("", response_model=list[InboxResponse])
-async def list_inboxes(db: AsyncSession = Depends(get_db)):
-    # fetch all inboxes first
-    result = await db.execute(select(Inbox).order_by(Inbox.id))
+async def list_inboxes(request: Request, db: AsyncSession = Depends(get_db)):
+    uid = get_user_id(request)
+    # fetch all inboxes for this user
+    result = await db.execute(select(Inbox).where(Inbox.user_id == uid).order_by(Inbox.id))
     inboxes = result.scalars().all()
+    inbox_ids = [i.id for i in inboxes]
 
     # compute how many emails have been sent today per inbox by grouping
     from sqlalchemy import func
@@ -196,22 +199,25 @@ async def list_inboxes(db: AsyncSession = Depends(get_db)):
     start = datetime(today.year, today.month, today.day)
     end = start + timedelta(days=1)
 
-    # count logs per inbox in period
-    count_res = await db.execute(
-        select(EmailLog.inbox_id, func.count(EmailLog.id))
-        .where(EmailLog.sent_at >= start, EmailLog.sent_at < end)
-        .group_by(EmailLog.inbox_id)
-    )
-    counts = {row[0]: row[1] for row in count_res.all()}
+    counts = {}
+    pending_counts = {}
+    if inbox_ids:
+        # count logs per inbox in period
+        count_res = await db.execute(
+            select(EmailLog.inbox_id, func.count(EmailLog.id))
+            .where(EmailLog.inbox_id.in_(inbox_ids), EmailLog.sent_at >= start, EmailLog.sent_at < end)
+            .group_by(EmailLog.inbox_id)
+        )
+        counts = {row[0]: row[1] for row in count_res.all()}
 
-    # count pending future queue slots per inbox
-    now = datetime.utcnow()
-    pending_res = await db.execute(
-        select(QueueSlot.inbox_id, func.count(QueueSlot.id))
-        .where(QueueSlot.scheduled_date > now)
-        .group_by(QueueSlot.inbox_id)
-    )
-    pending_counts = {row[0]: row[1] for row in pending_res.all()}
+        # count pending future queue slots per inbox
+        now = datetime.utcnow()
+        pending_res = await db.execute(
+            select(QueueSlot.inbox_id, func.count(QueueSlot.id))
+            .where(QueueSlot.inbox_id.in_(inbox_ids), QueueSlot.scheduled_date > now)
+            .group_by(QueueSlot.inbox_id)
+        )
+        pending_counts = {row[0]: row[1] for row in pending_res.all()}
 
     for i in inboxes:
         i.sent_today = counts.get(i.id, 0)
@@ -223,10 +229,12 @@ async def list_inboxes(db: AsyncSession = Depends(get_db)):
 
 
 @router.post("", response_model=InboxResponse)
-async def create_inbox(data: InboxCreate, db: AsyncSession = Depends(get_db)):
+async def create_inbox(request: Request, data: InboxCreate, db: AsyncSession = Depends(get_db)):
+    uid = get_user_id(request)
     # Normalise tracking domain: strip scheme, paths, whitespace
     td = _normalise_tracking_domain(data.tracking_domain)
     inbox = Inbox(
+        user_id=uid,
         email=data.email,
         display_name=data.display_name,
         max_emails_per_day=data.max_emails_per_day,
@@ -302,9 +310,11 @@ async def update_inbox(
     inbox_id: int,
     data: InboxUpdate,
     background_tasks: BackgroundTasks,
+    request: Request,
     db: AsyncSession = Depends(get_db),
 ):
-    result = await db.execute(select(Inbox).where(Inbox.id == inbox_id))
+    uid = get_user_id(request)
+    result = await db.execute(select(Inbox).where(Inbox.id == inbox_id, Inbox.user_id == uid))
     inbox = result.scalar_one_or_none()
     if not inbox:
         raise HTTPException(404, "Inbox not found")
@@ -480,14 +490,11 @@ async def pause_inbox(
     inbox_id: int,
     body: PauseInboxRequest,
     background_tasks: BackgroundTasks,
+    request: Request,
     db: AsyncSession = Depends(get_db),
 ):
-    """Pause an inbox. Choose what happens to leads currently assigned to it:
-    - action='pause_leads': set sending_paused=True on all affected CampaignLeads.
-    - action='reassign': pause and run a full recalculation so remaining inboxes
-      automatically absorb the leads.
-    """
-    result = await db.execute(select(Inbox).where(Inbox.id == inbox_id))
+    uid = get_user_id(request)
+    result = await db.execute(select(Inbox).where(Inbox.id == inbox_id, Inbox.user_id == uid))
     inbox = result.scalar_one_or_none()
     if not inbox:
         raise HTTPException(404, "Inbox not found")
@@ -545,15 +552,11 @@ async def pause_inbox(
 async def unpause_inbox(
     inbox_id: int,
     background_tasks: BackgroundTasks,
+    request: Request,
     db: AsyncSession = Depends(get_db),
 ):
-    """Resume a paused inbox.
-
-    Also un-pauses any CampaignLeads that were paused because of this inbox
-    (i.e. leads in campaigns using this inbox that have sending_paused=True)
-    and triggers a full queue recalculation so they get new slots.
-    """
-    result = await db.execute(select(Inbox).where(Inbox.id == inbox_id))
+    uid = get_user_id(request)
+    result = await db.execute(select(Inbox).where(Inbox.id == inbox_id, Inbox.user_id == uid))
     inbox = result.scalar_one_or_none()
     if not inbox:
         raise HTTPException(404, "Inbox not found")
@@ -609,8 +612,9 @@ async def unpause_inbox(
 
 
 @router.delete("/{inbox_id}")
-async def delete_inbox(inbox_id: int, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(Inbox).where(Inbox.id == inbox_id))
+async def delete_inbox(inbox_id: int, request: Request, db: AsyncSession = Depends(get_db)):
+    uid = get_user_id(request)
+    result = await db.execute(select(Inbox).where(Inbox.id == inbox_id, Inbox.user_id == uid))
     inbox = result.scalar_one_or_none()
     if not inbox:
         raise HTTPException(404, "Inbox not found")

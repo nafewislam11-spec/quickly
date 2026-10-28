@@ -2,12 +2,13 @@
 import logging
 import os
 from datetime import datetime, timedelta, timezone
-from fastapi import APIRouter, BackgroundTasks, Depends, Query, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, Query, HTTPException, Request
 from sqlalchemy import select, func, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased, selectinload
 from pathlib import Path
 
+from app.auth import get_user_id
 from app import database as _app_db
 from app.database import get_db
 from app.campaign_lead_status import campaign_lead_schedule_eligibility_clause
@@ -425,6 +426,7 @@ async def _assign_variants_to_slots(db: AsyncSession) -> None:
 
 @router.get("/sent")
 async def global_sent(
+    request: Request,
     days_back: int = Query(30, ge=0, le=3650),
     limit: int = Query(1000, ge=1, le=5000),
     offset: int = Query(0, ge=0),
@@ -433,6 +435,7 @@ async def global_sent(
     db: AsyncSession = Depends(get_db),
 ):
     """All sent emails across every campaign with full details."""
+    uid = get_user_id(request)
     # We need: EmailLog + Lead + Campaign + Sequence (matched by campaign_id & sequence_index)
     SeqAlias = aliased(Sequence)
     InboxAlias = aliased(Inbox)
@@ -452,6 +455,7 @@ async def global_sent(
             & (SeqAlias.position == EmailLog.sequence_index),
         )
         .outerjoin(InboxAlias, EmailLog.inbox_id == InboxAlias.id)
+        .where(Campaign.user_id == uid)
         .order_by(EmailLog.sent_at.desc())
         .limit(limit)
         .offset(offset)
@@ -499,6 +503,7 @@ async def global_sent(
 
 @router.get("/scheduled")
 async def global_scheduled(
+    request: Request,
     days_ahead: int = Query(30, ge=0, le=3650),
     limit: int = Query(1000, ge=1, le=5000),
     offset: int = Query(0, ge=0),
@@ -506,6 +511,7 @@ async def global_scheduled(
     db: AsyncSession = Depends(get_db),
 ):
     """All upcoming queue slots across every campaign with full details."""
+    uid = get_user_id(request)
     SeqAlias = aliased(Sequence)
     query = (
         select(QueueSlot, CampaignLead, Campaign, Lead, Inbox, SeqAlias)
@@ -519,6 +525,7 @@ async def global_scheduled(
             & (SeqAlias.position == QueueSlot.sequence_index),
         )
         .where(
+            Campaign.user_id == uid,
             CampaignLead.sending_paused == False,  # noqa: E712
             CampaignLead.enrollment_status.in_(["active", "contacted"]),
         )
@@ -569,8 +576,9 @@ async def global_scheduled(
 
 
 @router.get("/sent/{log_id}")
-async def sent_detail(log_id: int, db: AsyncSession = Depends(get_db)):
+async def sent_detail(request: Request, log_id: int, db: AsyncSession = Depends(get_db)):
     """Fetch a single sent email with full sequence body, variables rendered, and events."""
+    uid = get_user_id(request)
     SeqAlias = aliased(Sequence)
     InboxAlias = aliased(Inbox)
     ClAlias = aliased(CampaignLead)
@@ -594,7 +602,7 @@ async def sent_detail(log_id: int, db: AsyncSession = Depends(get_db)):
             & (SeqAlias.position == EmailLog.sequence_index),
         )
         .outerjoin(InboxAlias, EmailLog.inbox_id == InboxAlias.id)
-        .where(EmailLog.id == log_id)
+        .where(EmailLog.id == log_id, Campaign.user_id == uid)
     )
     row = result.first()
     if not row:
@@ -606,9 +614,10 @@ async def sent_detail(log_id: int, db: AsyncSession = Depends(get_db)):
 
 
 @router.get("/scheduled/{slot_id}")
-async def scheduled_detail(slot_id: int, db: AsyncSession = Depends(get_db)):
+async def scheduled_detail(request: Request, slot_id: int, db: AsyncSession = Depends(get_db)):
     """Fetch a single scheduled slot with full sequence body, variables rendered,
     and all overrides/applicable variants applied."""
+    uid = get_user_id(request)
     SeqAlias = aliased(Sequence)
     result = await db.execute(
         select(QueueSlot, CampaignLead, Campaign, Lead, Inbox, SeqAlias)
@@ -622,7 +631,7 @@ async def scheduled_detail(slot_id: int, db: AsyncSession = Depends(get_db)):
             (SeqAlias.campaign_id == Campaign.id)
             & (SeqAlias.position == QueueSlot.sequence_index),
         )
-        .where(QueueSlot.id == slot_id)
+        .where(QueueSlot.id == slot_id, Campaign.user_id == uid)
     )
     row = result.first()
     if not row:
@@ -664,11 +673,23 @@ async def log_click(log_id: int, payload: dict, db: AsyncSession = Depends(get_d
     return {"ok": True}
 
 @router.get("/stats")
-async def global_stats(db: AsyncSession = Depends(get_db)):
+async def global_stats(request: Request, db: AsyncSession = Depends(get_db)):
     """Quick summary for the schedule header."""
-    sent_count = await db.execute(select(func.count(EmailLog.id)))
-    scheduled_count = await db.execute(select(func.count(QueueSlot.id)))
-    campaign_count = await db.execute(select(func.count(Campaign.id)))
+    uid = get_user_id(request)
+    sent_count = await db.execute(
+        select(func.count(EmailLog.id))
+        .join(Campaign, EmailLog.campaign_id == Campaign.id)
+        .where(Campaign.user_id == uid)
+    )
+    scheduled_count = await db.execute(
+        select(func.count(QueueSlot.id))
+        .join(CampaignLead, QueueSlot.campaign_lead_id == CampaignLead.id)
+        .join(Campaign, CampaignLead.campaign_id == Campaign.id)
+        .where(Campaign.user_id == uid)
+    )
+    campaign_count = await db.execute(
+        select(func.count(Campaign.id)).where(Campaign.user_id == uid)
+    )
     finished_at = await get_setting(db, GLOBAL_RECALC_FINISHED_AT_KEY)
     return {
         "total_sent": sent_count.scalar() or 0,

@@ -8,7 +8,8 @@ import csv
 import io
 import json
 import logging
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, UploadFile, File, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, UploadFile, File, Query, Request
+from app.auth import get_user_id
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -126,9 +127,12 @@ async def _get_inbox_ids_for_campaigns(db: AsyncSession, campaign_ids: list[int]
 
 
 @router.get("", response_model=list[CampaignResponse])
-async def list_campaigns(db: AsyncSession = Depends(get_db)):
+async def list_campaigns(request: Request, db: AsyncSession = Depends(get_db)):
+    uid = get_user_id(request)
     # retrieve base objects
-    result = await db.execute(select(Campaign).order_by(Campaign.priority, Campaign.id))
+    result = await db.execute(
+        select(Campaign).where(Campaign.user_id == uid).order_by(Campaign.priority, Campaign.id)
+    )
     campaigns = result.scalars().all()
     campaign_ids = [c.id for c in campaigns]
     inbox_map = await _get_inbox_ids_for_campaigns(db, campaign_ids)
@@ -283,10 +287,12 @@ async def campaigns_have_leads(db: AsyncSession = Depends(get_db)):
 
 
 @router.post("", response_model=CampaignResponse)
-async def create_campaign(data: CampaignCreate, db: AsyncSession = Depends(get_db)):
+async def create_campaign(request: Request, data: CampaignCreate, db: AsyncSession = Depends(get_db)):
+    uid = get_user_id(request)
     # if not data.inbox_ids:
     #     raise HTTPException(400, "At least one inbox required")
     campaign = Campaign(
+        user_id=uid,
         name=data.name,
         sending_days=data.sending_days,
         sending_hours_start=data.sending_hours_start,
@@ -305,11 +311,17 @@ async def create_campaign(data: CampaignCreate, db: AsyncSession = Depends(get_d
         custom_sequence_mode=data.custom_sequence_mode,
     )
     db.add(campaign)
-    await db.flush()
-    for pos, inbox_id in enumerate(data.inbox_ids):
+    valid_inboxes = []
+    if data.inbox_ids:
+        inbox_rows = await db.execute(
+            select(Inbox.id).where(Inbox.id.in_(data.inbox_ids), Inbox.user_id == uid)
+        )
+        valid_inbox_set = {r[0] for r in inbox_rows.all()}
+        valid_inboxes = [iid for iid in data.inbox_ids if iid in valid_inbox_set]
+    for pos, inbox_id in enumerate(valid_inboxes):
         db.add(CampaignInbox(campaign_id=campaign.id, inbox_id=inbox_id, position=pos))
     await db.refresh(campaign)
-    return _campaign_to_response(campaign, list(data.inbox_ids))
+    return _campaign_to_response(campaign, valid_inboxes)
 
 
 class CampaignReorder(BaseModel):
@@ -363,8 +375,11 @@ async def reorder_campaigns(
 
 
 @router.get("/{campaign_id}", response_model=CampaignResponse)
-async def get_campaign(campaign_id: int, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(Campaign).where(Campaign.id == campaign_id))
+async def get_campaign(campaign_id: int, request: Request, db: AsyncSession = Depends(get_db)):
+    uid = get_user_id(request)
+    result = await db.execute(
+        select(Campaign).where(Campaign.id == campaign_id, Campaign.user_id == uid)
+    )
     campaign = result.scalar_one_or_none()
     if not campaign:
         raise HTTPException(404, "Campaign not found")
@@ -433,8 +448,11 @@ async def get_campaign(campaign_id: int, db: AsyncSession = Depends(get_db)):
 
 
 @router.delete("/{campaign_id}")
-async def delete_campaign(campaign_id: int, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(Campaign).where(Campaign.id == campaign_id))
+async def delete_campaign(campaign_id: int, request: Request, db: AsyncSession = Depends(get_db)):
+    uid = get_user_id(request)
+    result = await db.execute(
+        select(Campaign).where(Campaign.id == campaign_id, Campaign.user_id == uid)
+    )
     campaign = result.scalar_one_or_none()
     if not campaign:
         raise HTTPException(404, "Campaign not found")
@@ -483,9 +501,13 @@ async def update_campaign(
     campaign_id: int,
     data: CampaignUpdate,
     background_tasks: BackgroundTasks,
+    request: Request,
     db: AsyncSession = Depends(get_db),
 ):
-    result = await db.execute(select(Campaign).where(Campaign.id == campaign_id))
+    uid = get_user_id(request)
+    result = await db.execute(
+        select(Campaign).where(Campaign.id == campaign_id, Campaign.user_id == uid)
+    )
     campaign = result.scalar_one_or_none()
     if not campaign:
         raise HTTPException(404, "Campaign not found")
@@ -493,11 +515,14 @@ async def update_campaign(
     if data.name is not None:
         campaign.name = data.name
     if data.inbox_ids is not None:
-        # if not data.inbox_ids:
-        #     raise HTTPException(400, "At least one inbox required")
+        valid_inbox_rows = await db.execute(
+            select(Inbox.id).where(Inbox.id.in_(data.inbox_ids), Inbox.user_id == uid)
+        )
+        valid_inbox_set = {r[0] for r in valid_inbox_rows.all()}
+        valid_inbox_ids = [iid for iid in data.inbox_ids if iid in valid_inbox_set]
         await db.execute(delete(CampaignInbox).where(CampaignInbox.campaign_id == campaign_id))
         await db.flush()
-        for pos, inbox_id in enumerate(data.inbox_ids):
+        for pos, inbox_id in enumerate(valid_inbox_ids):
             db.add(CampaignInbox(campaign_id=campaign_id, inbox_id=inbox_id, position=pos))
         await db.flush()
         # Recalculate queue since inbox assignments changed
@@ -607,9 +632,12 @@ async def update_campaign(
 
 
 @router.post("/{campaign_id}/duplicate", response_model=CampaignResponse)
-async def duplicate_campaign(campaign_id: int, db: AsyncSession = Depends(get_db)):
+async def duplicate_campaign(campaign_id: int, request: Request, db: AsyncSession = Depends(get_db)):
     """Create a copy of a campaign with all its sequences, but no enrolled leads."""
-    result = await db.execute(select(Campaign).where(Campaign.id == campaign_id))
+    uid = get_user_id(request)
+    result = await db.execute(
+        select(Campaign).where(Campaign.id == campaign_id, Campaign.user_id == uid)
+    )
     original = result.scalar_one_or_none()
     if not original:
         raise HTTPException(404, "Campaign not found")
@@ -626,6 +654,7 @@ async def duplicate_campaign(campaign_id: int, db: AsyncSession = Depends(get_db
     
     # Create new campaign
     new_campaign = Campaign(
+        user_id=uid,
         name=f"{original.name} (Copy)",
         sending_days=original.sending_days,
         sending_hours_start=original.sending_hours_start,
@@ -2151,6 +2180,7 @@ async def bulk_add_leads_to_campaign(
                 lead = Lead(
                     email=email,
                     name=entry.name or "",
+                    user_id=getattr(campaign_obj, "user_id", None) or 1,
                     custom_data=entry.custom_data or {},
                 )
                 db.add(lead)
@@ -2881,7 +2911,11 @@ async def import_campaign_leads(
             lead_result = await db.execute(select(Lead).where(Lead.email == email))
             lead = lead_result.scalar_one_or_none()
             if not lead:
-                lead = Lead(email=email, name=name, custom_data=custom_data)
+                lead = Lead(
+                    email=email,
+                    name=name,
+                    user_id=getattr(campaign_obj, "user_id", None) or 1,
+                    custom_data=custom_data,)
                 db.add(lead)
                 await db.flush()
             else:

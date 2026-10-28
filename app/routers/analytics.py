@@ -3,10 +3,11 @@ import logging
 from datetime import datetime, timedelta
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy import cast, Date, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.auth import get_user_id
 from app.database import get_db
 from app.models import Campaign, CampaignLead, EmailClick, EmailLog, EmailOpen, LeadReply
 
@@ -16,6 +17,7 @@ router = APIRouter(prefix="/api/analytics", tags=["analytics"])
 
 @router.get("/daily")
 async def daily_analytics(
+    request: Request,
     start_date: str = Query(..., description="Inclusive start date YYYY-MM-DD"),
     end_date: str = Query(..., description="Inclusive end date YYYY-MM-DD"),
     campaign_id: Optional[List[int]] = Query(None),
@@ -25,18 +27,22 @@ async def daily_analytics(
 
     No row limit — result size is bounded by (days × campaigns).
     """
+    uid = get_user_id(request)
     try:
         start = datetime.strptime(start_date, "%Y-%m-%d")
         end = datetime.strptime(end_date, "%Y-%m-%d") + timedelta(days=1)
     except ValueError:
         raise HTTPException(status_code=400, detail="start_date and end_date must be YYYY-MM-DD")
 
-    # campaign name lookup
-    camp_stmt = select(Campaign.id, Campaign.name)
+    # campaign name lookup for current user
+    camp_stmt = select(Campaign.id, Campaign.name).where(Campaign.user_id == uid)
     if campaign_id:
         camp_stmt = camp_stmt.where(Campaign.id.in_(campaign_id))
     camp_rows = (await db.execute(camp_stmt)).all()
     campaign_names = {cid: name for cid, name in camp_rows}
+    user_camp_ids = list(campaign_names.keys())
+    if not user_camp_ids:
+        return []
 
     # sent per day per campaign
     sent_stmt = (
@@ -45,11 +51,13 @@ async def daily_analytics(
             EmailLog.campaign_id,
             func.count().label("sent"),
         )
-        .where(EmailLog.sent_at >= start, EmailLog.sent_at < end)
+        .where(
+            EmailLog.sent_at >= start,
+            EmailLog.sent_at < end,
+            EmailLog.campaign_id.in_(user_camp_ids),
+        )
         .group_by(cast(EmailLog.sent_at, Date), EmailLog.campaign_id)
     )
-    if campaign_id:
-        sent_stmt = sent_stmt.where(EmailLog.campaign_id.in_(campaign_id))
 
     # opens per day per campaign
     opens_stmt = (
@@ -60,11 +68,13 @@ async def daily_analytics(
             func.count(func.distinct(EmailOpen.ip_address)).label("unique_opens"),
         )
         .join(EmailLog, EmailOpen.email_log_id == EmailLog.id)
-        .where(EmailOpen.opened_at >= start, EmailOpen.opened_at < end)
+        .where(
+            EmailOpen.opened_at >= start,
+            EmailOpen.opened_at < end,
+            EmailLog.campaign_id.in_(user_camp_ids),
+        )
         .group_by(cast(EmailOpen.opened_at, Date), EmailLog.campaign_id)
     )
-    if campaign_id:
-        opens_stmt = opens_stmt.where(EmailLog.campaign_id.in_(campaign_id))
 
     # clicks per day per campaign
     clicks_stmt = (
@@ -75,11 +85,13 @@ async def daily_analytics(
             func.count(func.distinct(EmailClick.ip_address)).label("unique_clicks"),
         )
         .join(EmailLog, EmailClick.email_log_id == EmailLog.id)
-        .where(EmailClick.clicked_at >= start, EmailClick.clicked_at < end)
+        .where(
+            EmailClick.clicked_at >= start,
+            EmailClick.clicked_at < end,
+            EmailLog.campaign_id.in_(user_camp_ids),
+        )
         .group_by(cast(EmailClick.clicked_at, Date), EmailLog.campaign_id)
     )
-    if campaign_id:
-        clicks_stmt = clicks_stmt.where(EmailLog.campaign_id.in_(campaign_id))
 
     # replies per day per campaign (excluding OOO and auto-reply)
     replies_stmt = (
@@ -96,12 +108,11 @@ async def daily_analytics(
         .where(
             LeadReply.replied_at >= start,
             LeadReply.replied_at < end,
+            LeadReply.campaign_id.in_(user_camp_ids),
             CampaignLead.interest_status.notin_(["out_of_office", "auto_reply"]),
         )
         .group_by(cast(LeadReply.replied_at, Date), LeadReply.campaign_id)
     )
-    if campaign_id:
-        replies_stmt = replies_stmt.where(LeadReply.campaign_id.in_(campaign_id))
 
     sent_rows    = (await db.execute(sent_stmt)).all()
     opens_rows   = (await db.execute(opens_stmt)).all()

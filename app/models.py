@@ -99,6 +99,7 @@ class Inbox(Base):
     max_emails_per_day = Column(Integer, default=50, nullable=False)
     wait_minutes_between = Column(Integer, default=5, nullable=False)  # Minutes between emails from this inbox
     max_jitter_seconds = Column(Integer, default=180, nullable=False)   # Max random seconds added to each send time (0 = disabled)
+    user_id = Column(Integer, ForeignKey("app_user.id", ondelete="CASCADE"), nullable=True, index=True)
     provider = Column(String(32), default="gmail")  # gmail | office365 | smtp
     # Custom tracking domain for this inbox (hostname only, e.g. "mail.client.com").
     # When set, open/click tracking URLs for emails sent from this inbox will use
@@ -132,12 +133,14 @@ class Inbox(Base):
     smtp_account = relationship("SmtpAccount", back_populates="inbox", uselist=False, cascade="all, delete-orphan")
     smtp_sync_state = relationship("SmtpSyncState", uselist=False, cascade="all, delete-orphan")
     smtp_threads = relationship("SmtpThread", back_populates="inbox", cascade="all, delete-orphan")
+    user = relationship("User", foreign_keys=[user_id])
 
 
 class Lead(Base):
     __tablename__ = "lead"
     id = Column(Integer, primary_key=True, index=True)
     email = Column(String(255), nullable=False, index=True)
+    user_id = Column(Integer, ForeignKey("app_user.id", ondelete="CASCADE"), nullable=True, index=True)
     name = Column(String(255), default="")
     custom_data = Column(JSON, default=dict)  # e.g. {"company": "...", "title": "..."}
     status = Column(String(32), default="active")  # active, unsubscribed, bounced, replied, invalid
@@ -156,12 +159,14 @@ class Lead(Base):
         back_populates="lead",
         cascade="all, delete-orphan",
     )
+    user = relationship("User", foreign_keys=[user_id])
 
 
 class Campaign(Base):
     __tablename__ = "campaign"
     id = Column(Integer, primary_key=True, index=True)
     public_id = Column(String(16), unique=True, nullable=False, index=True, default=_make_public_id)
+    user_id = Column(Integer, ForeignKey("app_user.id", ondelete="CASCADE"), nullable=True, index=True)
     name = Column(String(255), nullable=False)
     paused = Column(Boolean, default=False)  # If True, skip sending from this campaign
     priority = Column(Integer, default=0, nullable=False)  # Lower = higher priority in priority-based scheduling
@@ -207,6 +212,7 @@ class Campaign(Base):
         back_populates="campaign",
         cascade="all, delete-orphan",
     )
+    user = relationship("User", foreign_keys=[user_id])
 
 
 class CampaignInbox(Base):

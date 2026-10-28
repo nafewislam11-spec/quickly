@@ -15,6 +15,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.auth import get_user_id
 from app.database import get_db
 from app.models import GmailAccount, GmailMessage, GmailSyncState, Inbox, Office365Account, Office365Message, SmtpAccount, SmtpMessage
 from app.app_settings import get_office365_oauth_credentials
@@ -88,13 +89,17 @@ def _extract_message_id_from_headers(headers_json: str) -> str | None:
 
 @router.get("")
 async def get_unibox(
+    request: Request,
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=50, ge=1, le=200),
     leads_only: bool = Query(default=True),
     lead_status: str | None = Query(default=None),
     db: AsyncSession = Depends(get_db),
 ):
-    return await list_unibox_conversations(db, page=page, page_size=page_size, leads_only=leads_only, lead_status=lead_status)
+    uid = get_user_id(request)
+    return await list_unibox_conversations(
+        db, page=page, page_size=page_size, leads_only=leads_only, lead_status=lead_status, user_id=uid
+    )
 
 
 @router.get("/status")
@@ -103,9 +108,10 @@ async def get_unibox_status(inbox_id: int | None = Query(default=None, ge=1)):
 
 
 @router.get("/notifications")
-async def get_unibox_notifications(db: AsyncSession = Depends(get_db)):
+async def get_unibox_notifications(request: Request, db: AsyncSession = Depends(get_db)):
     """Return the count of threads with an unread lead reply."""
-    count = await get_notification_count(db)
+    uid = get_user_id(request)
+    count = await get_notification_count(db, user_id=uid)
     return {"count": count}
 
 
@@ -127,10 +133,11 @@ _SYNC_PROVIDERS = ("gmail", "office365", "smtp", "zoho")
 
 
 @router.post("/sync")
-async def trigger_unibox_sync(data: UniboxSyncRequest, db: AsyncSession = Depends(get_db)):
+async def trigger_unibox_sync(request: Request, data: UniboxSyncRequest, db: AsyncSession = Depends(get_db)):
+    uid = get_user_id(request)
     if data.inbox_id:
         inbox_row = await db.execute(
-            select(Inbox.id).where(Inbox.id == data.inbox_id, Inbox.provider.in_(_SYNC_PROVIDERS))
+            select(Inbox.id).where(Inbox.id == data.inbox_id, Inbox.provider.in_(_SYNC_PROVIDERS), Inbox.user_id == uid)
         )
         inbox_id = inbox_row.scalar_one_or_none()
         if not inbox_id:
@@ -138,21 +145,23 @@ async def trigger_unibox_sync(data: UniboxSyncRequest, db: AsyncSession = Depend
         await queue_sync_for_inbox(inbox_id, reason="manual")
         return {"ok": True, "queued": 1, "inbox_ids": [inbox_id]}
 
-    inbox_rows = await db.execute(select(Inbox.id).where(Inbox.provider.in_(_SYNC_PROVIDERS)))
+    inbox_rows = await db.execute(select(Inbox.id).where(Inbox.provider.in_(_SYNC_PROVIDERS), Inbox.user_id == uid))
     inbox_ids = [int(row[0]) for row in inbox_rows.all()]
     if not inbox_ids:
         return {"ok": True, "queued": 0, "inbox_ids": []}
 
-    await queue_sync_for_all_inboxes(reason="manual")
+    for iid in inbox_ids:
+        await queue_sync_for_inbox(iid, reason="manual")
     return {"ok": True, "queued": len(inbox_ids), "inbox_ids": inbox_ids}
 
 
 @router.post("/load-more")
-async def trigger_unibox_load_more(data: UniboxLoadMoreRequest, db: AsyncSession = Depends(get_db)):
+async def trigger_unibox_load_more(request: Request, data: UniboxLoadMoreRequest, db: AsyncSession = Depends(get_db)):
+    uid = get_user_id(request)
     window_days = max(1, int(data.window_days))
     if data.inbox_id:
         inbox_row = await db.execute(
-            select(Inbox.id).where(Inbox.id == data.inbox_id, Inbox.provider.in_(_SYNC_PROVIDERS))
+            select(Inbox.id).where(Inbox.id == data.inbox_id, Inbox.provider.in_(_SYNC_PROVIDERS), Inbox.user_id == uid)
         )
         inbox_id = inbox_row.scalar_one_or_none()
         if not inbox_id:
@@ -164,15 +173,13 @@ async def trigger_unibox_load_more(data: UniboxLoadMoreRequest, db: AsyncSession
         )
         return {"ok": True, "queued": 1, "inbox_ids": [inbox_id], "window_days": window_days}
 
-    inbox_rows = await db.execute(select(Inbox.id).where(Inbox.provider.in_(_SYNC_PROVIDERS)))
+    inbox_rows = await db.execute(select(Inbox.id).where(Inbox.provider.in_(_SYNC_PROVIDERS), Inbox.user_id == uid))
     inbox_ids = [int(row[0]) for row in inbox_rows.all()]
     if not inbox_ids:
         return {"ok": True, "queued": 0, "inbox_ids": [], "window_days": window_days}
 
-    await queue_backfill_for_all_inboxes(
-        window_days=window_days,
-        reason="manual-backfill",
-    )
+    for iid in inbox_ids:
+        await queue_backfill_for_inbox(iid, window_days=window_days, reason="manual-backfill")
     return {"ok": True, "queued": len(inbox_ids), "inbox_ids": inbox_ids, "window_days": window_days}
 
 
@@ -207,8 +214,9 @@ async def get_unibox_thread(
 
 
 @router.post("/send")
-async def send_unibox_email(data: UniboxSendRequest, db: AsyncSession = Depends(get_db)):
-    inbox_row = await db.execute(select(Inbox).where(Inbox.id == data.inbox_id))
+async def send_unibox_email(request: Request, data: UniboxSendRequest, db: AsyncSession = Depends(get_db)):
+    uid = get_user_id(request)
+    inbox_row = await db.execute(select(Inbox).where(Inbox.id == data.inbox_id, Inbox.user_id == uid))
     inbox = inbox_row.scalar_one_or_none()
     if not inbox:
         raise HTTPException(status_code=404, detail="Inbox not found")

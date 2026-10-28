@@ -234,6 +234,16 @@ async def _run_migrations(conn) -> None:
         # view and quoted follow-ups reproduce what was actually sent even when
         # the template uses {{random: ...}} (which cannot be re-derived later).
         "ALTER TABLE email_log ADD COLUMN IF NOT EXISTS body TEXT NULL",
+        # 2026-10-28: Multi-tenant workspace isolation for campaigns, inboxes, and leads
+        "ALTER TABLE campaign ADD COLUMN IF NOT EXISTS user_id INTEGER NULL REFERENCES app_user(id) ON DELETE CASCADE",
+        "ALTER TABLE inbox ADD COLUMN IF NOT EXISTS user_id INTEGER NULL REFERENCES app_user(id) ON DELETE CASCADE",
+        "ALTER TABLE lead ADD COLUMN IF NOT EXISTS user_id INTEGER NULL REFERENCES app_user(id) ON DELETE CASCADE",
+        "UPDATE campaign SET user_id = 1 WHERE user_id IS NULL",
+        "UPDATE inbox SET user_id = 1 WHERE user_id IS NULL",
+        "UPDATE lead SET user_id = 1 WHERE user_id IS NULL",
+        "CREATE INDEX IF NOT EXISTS ix_campaign_user_id ON campaign (user_id)",
+        "CREATE INDEX IF NOT EXISTS ix_inbox_user_id ON inbox (user_id)",
+        "CREATE INDEX IF NOT EXISTS ix_lead_user_id ON lead (user_id)",
     ]
     # custom_email_override table (IF NOT EXISTS — must be a separate stmt
     # because it uses raw SQL, not ALTER TABLE)
