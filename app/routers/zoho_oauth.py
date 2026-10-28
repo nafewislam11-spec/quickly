@@ -165,6 +165,7 @@ async def debug_zoho_account_info(
     send_url = f"{mail_base}/api/accounts/{account_id}/messages"
     
     variations = [
+        {"desc": "webmail from field", "fromAddress": "business@workwithkinetic.online", "from": '"Nafew" <business@workwithkinetic.online>', "fromName": "Nafew", "displayName": "Nafew"},
         {"desc": "Name <email> in fromAddress", "fromAddress": "Nafew <business@workwithkinetic.online>"},
         {"desc": "fromName key in payload", "fromAddress": "business@workwithkinetic.online", "fromName": "Nafew"},
         {"desc": "userName key in payload", "fromAddress": "business@workwithkinetic.online", "userName": "Nafew"},
@@ -180,8 +181,12 @@ async def debug_zoho_account_info(
             "mailFormat": "plaintext",
             "askReceipt": "no",
         }
+        if "from" in var:
+            payload["from"] = var["from"]
         if "fromName" in var:
             payload["fromName"] = var["fromName"]
+        if "displayName" in var:
+            payload["displayName"] = var["displayName"]
         if "userName" in var:
             payload["userName"] = var["userName"]
         
