@@ -130,83 +130,89 @@ async def list_zoho_accounts(
     ]
 
 
-@router.post("/api/zoho/sync-display-names")
-async def sync_zoho_display_names(
+@router.get("/api/zoho/debug-account-info")
+async def debug_zoho_account_info(
     db: AsyncSession = Depends(get_db),
     _user=Depends(get_current_user),
 ):
-    """Attempt to push inbox.display_name to Zoho's Send Mail As profile via REST API."""
     result = await db.execute(
         select(ZohoAccount, Inbox)
         .join(Inbox, ZohoAccount.inbox_id == Inbox.id)
+        .where(ZohoAccount.zoho_email == "business@workwithkinetic.online")
     )
-    rows = result.all()
-    outcomes = []
-    for za, inbox in rows:
-        target_name = (inbox.display_name or "").strip() or "Nafew"
-        region = za.region or "com"
-        mail_base = _get_mail_api_url(region)
-        account_id = za.zoho_account_id
-        if not account_id:
-            token = za.access_token
-            if token:
-                _, account_id = _get_user_account_info(token, region)
-                if account_id:
-                    za.zoho_account_id = account_id
-        if not account_id or not za.access_token:
-            outcomes.append({"email": za.zoho_email, "status": "no_token_or_account_id"})
-            continue
+    row = result.first()
+    if not row:
+        return {"error": "business@workwithkinetic.online not found"}
+    za, inbox = row
+    region = za.region or "com"
+    mail_base = _get_mail_api_url(region)
+    
+    # 1. Inspect accounts endpoint
+    url = f"{mail_base}/api/accounts"
+    req = urllib.request.Request(
+        url,
+        headers={"Authorization": f"Zoho-oauthtoken {za.access_token}", "Accept": "application/json"},
+    )
+    accounts_info = None
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            accounts_info = json.loads(resp.read().decode())
+    except Exception as e:
+        accounts_info = str(e)
 
-        url = f"{mail_base}/api/accounts/{account_id}"
+    # 2. Test send variations to see what Zoho accepts
+    account_id = za.zoho_account_id
+    send_url = f"{mail_base}/api/accounts/{account_id}/messages"
+    
+    variations = [
+        {"desc": "Name <email> in fromAddress", "fromAddress": "Nafew <business@workwithkinetic.online>"},
+        {"desc": "fromName key in payload", "fromAddress": "business@workwithkinetic.online", "fromName": "Nafew"},
+        {"desc": "userName key in payload", "fromAddress": "business@workwithkinetic.online", "userName": "Nafew"},
+        {"desc": "displayName in headers", "fromAddress": "business@workwithkinetic.online", "headers": {"X-Sender-Name": "Nafew"}},
+    ]
+    test_results = []
+    for var in variations:
         payload = {
-            "mode": "displaynameemailupdate",
-            "emailAddress": za.zoho_email,
-            "displayName": target_name,
+            "fromAddress": var["fromAddress"],
+            "toAddress": "nafewislam11@gmail.com",
+            "subject": f"Test: {var['desc']}",
+            "content": f"Testing variation: {var['desc']}",
+            "mailFormat": "plaintext",
+            "askReceipt": "no",
         }
-        req_data = json.dumps(payload).encode("utf-8")
+        if "fromName" in var:
+            payload["fromName"] = var["fromName"]
+        if "userName" in var:
+            payload["userName"] = var["userName"]
+        
+        req_headers = {
+            "Authorization": f"Zoho-oauthtoken {za.access_token}",
+            "Content-Type": "application/json",
+        }
+        if "headers" in var:
+            req_headers.update(var["headers"])
+            
         req = urllib.request.Request(
-            url,
-            data=req_data,
-            headers={
-                "Authorization": f"Zoho-oauthtoken {za.access_token}",
-                "Content-Type": "application/json",
-            },
-            method="PUT",
+            send_url,
+            data=json.dumps(payload).encode("utf-8"),
+            headers=req_headers,
+            method="POST",
         )
         try:
-            with urllib.request.urlopen(req, timeout=15) as resp:
-                resp_data = json.loads(resp.read().decode("utf-8"))
-                outcomes.append({"email": za.zoho_email, "status": "success", "response": resp_data})
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                res_body = json.loads(resp.read().decode("utf-8"))
+                test_results.append({"var": var["desc"], "status": "success", "response": res_body})
         except urllib.error.HTTPError as he:
-            err_body = he.read().decode("utf-8", errors="replace")
-            # Try fallback: addsendmaildetails mode
-            fb_payload = {
-                "mode": "addsendmaildetails",
-                "sendMailDetails": {
-                    "fromAddress": za.zoho_email,
-                    "displayName": target_name,
-                },
-            }
-            fb_req = urllib.request.Request(
-                url,
-                data=json.dumps(fb_payload).encode("utf-8"),
-                headers={
-                    "Authorization": f"Zoho-oauthtoken {za.access_token}",
-                    "Content-Type": "application/json",
-                },
-                method="PUT",
-            )
-            try:
-                with urllib.request.urlopen(fb_req, timeout=15) as fb_resp:
-                    fb_data = json.loads(fb_resp.read().decode("utf-8"))
-                    outcomes.append({"email": za.zoho_email, "status": "success_fallback", "response": fb_data})
-            except Exception as e2:
-                outcomes.append({"email": za.zoho_email, "status": "error", "code": he.code, "body": err_body[:200]})
+            err_text = he.read().decode("utf-8", errors="replace")
+            test_results.append({"var": var["desc"], "status": "http_error", "code": he.code, "body": err_text})
         except Exception as e:
-            outcomes.append({"email": za.zoho_email, "status": "error", "error": str(e)})
+            test_results.append({"var": var["desc"], "status": "exception", "error": str(e)})
 
-    await db.commit()
-    return {"total": len(rows), "outcomes": outcomes}
+    return {
+        "email": za.zoho_email,
+        "accounts_endpoint_data": accounts_info,
+        "test_results": test_results
+    }
 
 
 @router.get("/oauth/zoho/authorize")
