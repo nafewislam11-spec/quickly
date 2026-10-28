@@ -2769,6 +2769,15 @@ function CustomEmailEditorModal({ target, campaignId, onClose, onSaved }) {
         setSubject('');
         setBody('');
       }
+      if (lead.lead_id && sequence?.id) {
+        api.get(`/campaigns/${campaignId}/leads/${lead.lead_id}/custom-email/${sequence.id}`)
+          .then(data => {
+            if (data?.subject !== undefined) setSubject(data.subject ?? '');
+            if (data?.body !== undefined) setBody(data.body ?? '');
+            if (data?.is_html !== undefined) setIsHtml(data.is_html);
+          })
+          .catch(() => {});
+      }
       setIsHtml(sequence?.is_html ?? false);
       setSubjectError('');
       setBodyError('');

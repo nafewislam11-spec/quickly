@@ -1092,6 +1092,8 @@ async def list_campaign_leads(campaign_id: int, db: AsyncSession = Depends(get_d
                 "sequence_id": sid,
                 "sequence_position": spos,
                 "subject": details.get("subject"),
+                "body": details.get("body"),
+                "is_html": details.get("is_html", False),
                 "written": is_written,
                 "already_sent": already_sent,
             })
@@ -1365,6 +1367,42 @@ async def reconcile_personalized_endpoint(
     if not camp_result.scalar_one_or_none():
         raise HTTPException(404, "Campaign not found")
     return await reconcile_personalized_status(db, campaign_id, background_tasks)
+
+
+@router.get("/{campaign_id}/leads/{lead_id}/custom-email/{sequence_id}")
+async def get_custom_email(
+    campaign_id: int,
+    lead_id: int,
+    sequence_id: int,
+    db: AsyncSession = Depends(get_db),
+):
+    """Retrieve the custom email override for a lead on a sequence step."""
+    cl_res = await db.execute(
+        select(CampaignLead).where(
+            CampaignLead.campaign_id == campaign_id,
+            CampaignLead.lead_id == lead_id,
+        )
+    )
+    cl = cl_res.scalar_one_or_none()
+    if not cl:
+        raise HTTPException(404, "Lead not found in campaign")
+    ov_res = await db.execute(
+        select(CustomEmailOverride).where(
+            CustomEmailOverride.campaign_lead_id == cl.id,
+            CustomEmailOverride.sequence_id == sequence_id,
+        )
+    )
+    ov = ov_res.scalar_one_or_none()
+    if not ov:
+        raise HTTPException(404, "No custom email found")
+    return {
+        "campaign_id": campaign_id,
+        "lead_id": lead_id,
+        "sequence_id": sequence_id,
+        "subject": ov.subject,
+        "body": ov.body,
+        "is_html": ov.is_html,
+    }
 
 
 @router.patch("/{campaign_id}/leads/{lead_id}/custom-email/{sequence_id}")
