@@ -123,7 +123,9 @@ export default function CampaignDetail() {
     m += offset;
     h += Math.floor(m / 60);
     m = m % 60;
-    return `${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}`;
+    const period = (h % 24) >= 12 ? 'PM' : 'AM';
+    const h12 = (h % 12) || 12;
+    return `${String(h12).padStart(2,'0')}:${String(m).padStart(2,'0')} ${period}`;
   }
 
   function formatTime(isoStr) {
@@ -182,7 +184,13 @@ export default function CampaignDetail() {
         )}
         {upcoming.length > 0 && (
           <>
-            <div className="text-gray-600 font-semibold py-2">Upcoming ({upcoming.length} scheduled)</div>
+            <div className="flex items-center justify-between py-2">
+              <div className="text-gray-600 font-semibold">Upcoming ({upcoming.length} scheduled)</div>
+              <div className="text-xs text-teal-800 bg-teal-50 border border-teal-200 rounded px-2.5 py-1 font-medium flex items-center gap-1.5 shadow-sm">
+                <span>🕐</span>
+                <span>Timezone: <strong>{campaign?.timezone || 'UTC'}</strong> (12-hour AM/PM)</span>
+              </div>
+            </div>
             <table className="w-full text-sm border-collapse">
               <thead>
                 <tr className="bg-gray-50">

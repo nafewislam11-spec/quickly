@@ -18,13 +18,13 @@ export function formatDateKey(value, timeZone = DEFAULT_TIME_ZONE) {
 
 export function formatTimeParts(value, timeZone = DEFAULT_TIME_ZONE) {
   const date = value instanceof Date ? value : new Date(value);
-  if (Number.isNaN(date.getTime())) return { hours: '00', minutes: '00', seconds: '00' };
+  if (Number.isNaN(date.getTime())) return { hours: '00', minutes: '00', seconds: '00', period: 'AM' };
   const formatter = new Intl.DateTimeFormat('en-US', {
     timeZone: normalizeTimeZone(timeZone),
     hour: '2-digit',
     minute: '2-digit',
     second: '2-digit',
-    hour12: false,
+    hour12: true,
   });
   const parts = formatter.formatToParts(date);
   const lookup = Object.fromEntries(parts.map(p => [p.type, p.value]));
@@ -32,12 +32,14 @@ export function formatTimeParts(value, timeZone = DEFAULT_TIME_ZONE) {
     hours: lookup.hour || '00',
     minutes: lookup.minute || '00',
     seconds: lookup.second || '00',
+    period: lookup.dayPeriod || '',
   };
 }
 
 export function formatTimeKey(value, timeZone = DEFAULT_TIME_ZONE, includeSeconds = false) {
-  const { hours, minutes, seconds } = formatTimeParts(value, timeZone);
-  return includeSeconds ? `${hours}:${minutes}:${seconds}` : `${hours}:${minutes}`;
+  const { hours, minutes, seconds, period } = formatTimeParts(value, timeZone);
+  const timeStr = includeSeconds ? `${hours}:${minutes}:${seconds}` : `${hours}:${minutes}`;
+  return period ? `${timeStr} ${period}` : timeStr;
 }
 
 export function formatDateTimeKey(value, timeZone = DEFAULT_TIME_ZONE, includeSeconds = false) {
