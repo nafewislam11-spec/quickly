@@ -141,6 +141,8 @@ export default function CampaignDetail() {
     const today    = formatDateKey(new Date(), tz);
     const tomorrow = addDaysToDateKey(today, 1);
 
+    const userLocalTz = Intl.DateTimeFormat().resolvedOptions().timeZone || 'Asia/Dhaka';
+
     if (!sent.length && !upcoming.length)
       return <p className="text-gray-500">No emails sent or scheduled.</p>;
 
@@ -186,9 +188,16 @@ export default function CampaignDetail() {
           <>
             <div className="flex items-center justify-between py-2">
               <div className="text-gray-600 font-semibold">Upcoming ({upcoming.length} scheduled)</div>
-              <div className="text-xs text-teal-800 bg-teal-50 border border-teal-200 rounded px-2.5 py-1 font-medium flex items-center gap-1.5 shadow-sm">
+              <div className="text-xs text-teal-800 bg-teal-50 border border-teal-200 rounded px-2.5 py-1 font-medium flex items-center gap-2 shadow-sm">
                 <span>🕐</span>
-                <span>Timezone: <strong>{campaign?.timezone || 'UTC'}</strong> (12-hour AM/PM)</span>
+                <span>
+                  Campaign Timezone: <strong>{campaign?.timezone || 'UTC'}</strong> (US Office Hours: 09:00 AM – 05:00 PM)
+                </span>
+                {userLocalTz && campaign?.timezone && userLocalTz !== campaign.timezone && (
+                  <span className="text-indigo-700 bg-indigo-100/70 border border-indigo-200 px-1.5 py-0.5 rounded font-normal">
+                    Your local: {userLocalTz}
+                  </span>
+                )}
               </div>
             </div>
             <table className="w-full text-sm border-collapse">
@@ -207,6 +216,9 @@ export default function CampaignDetail() {
                     .map((q,i)=>{
                       const isPast = d < today;
                       const t = q.scheduled_date?.includes('T') ? formatTime(q.scheduled_date) : estimatedTime(q.position_in_day);
+                      const localT = (userLocalTz && campaign?.timezone && userLocalTz !== campaign.timezone && q.scheduled_date?.includes('T'))
+                        ? formatTimeKey(q.scheduled_date, userLocalTz)
+                        : '';
                       return (
                         <tr key={q.slot_id} className={`border-b ${isPast?'text-gray-400':''} ${!filter?'cursor-pointer hover:bg-gray-50':''}`}
                           onClick={()=>!filter&&setQueueFilter(q.lead_email)}>
@@ -219,7 +231,14 @@ export default function CampaignDetail() {
                               </>
                             ) : ''}
                           </td>
-                          <td className="px-3 py-1.5">{t}</td>
+                          <td className="px-3 py-1.5 whitespace-nowrap">
+                            <span>{t}</span>
+                            {localT && localT !== t && (
+                              <span className="ml-1.5 text-xs text-indigo-600 dark:text-indigo-400 bg-indigo-50 dark:bg-indigo-950/40 px-1.5 py-0.5 rounded font-normal" title={`Your local time (${userLocalTz})`}>
+                                ({localT} local)
+                              </span>
+                            )}
+                          </td>
                           <td className="px-3 py-1.5">{q.position_in_day}</td>
                           <td className="px-3 py-1.5 font-mono text-xs max-w-[200px] truncate" title={q.inbox_email || ''}>{q.inbox_email || '—'}</td>
                           <td className="px-3 py-1.5 font-mono">{q.lead_email}</td>
