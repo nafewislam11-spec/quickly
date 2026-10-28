@@ -1303,6 +1303,8 @@ def _send_via_zoho(
         "mailFormat": "html" if is_html else "plaintext",
         "askReceipt": "no",
     }
+    if from_name:
+        payload["displayName"] = from_name
     clean_in_reply_to = ""
     if reply_to_msg_id:
         clean_in_reply_to = reply_to_msg_id.strip("<>")

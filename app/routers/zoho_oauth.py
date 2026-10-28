@@ -130,6 +130,85 @@ async def list_zoho_accounts(
     ]
 
 
+@router.post("/api/zoho/sync-display-names")
+async def sync_zoho_display_names(
+    db: AsyncSession = Depends(get_db),
+    _user=Depends(get_current_user),
+):
+    """Attempt to push inbox.display_name to Zoho's Send Mail As profile via REST API."""
+    result = await db.execute(
+        select(ZohoAccount, Inbox)
+        .join(Inbox, ZohoAccount.inbox_id == Inbox.id)
+    )
+    rows = result.all()
+    outcomes = []
+    for za, inbox in rows:
+        target_name = (inbox.display_name or "").strip() or "Nafew"
+        region = za.region or "com"
+        mail_base = _get_mail_api_url(region)
+        account_id = za.zoho_account_id
+        if not account_id:
+            token = za.access_token
+            if token:
+                _, account_id = _get_user_account_info(token, region)
+                if account_id:
+                    za.zoho_account_id = account_id
+        if not account_id or not za.access_token:
+            outcomes.append({"email": za.zoho_email, "status": "no_token_or_account_id"})
+            continue
+
+        url = f"{mail_base}/api/accounts/{account_id}"
+        payload = {
+            "mode": "displaynameemailupdate",
+            "emailAddress": za.zoho_email,
+            "displayName": target_name,
+        }
+        req_data = json.dumps(payload).encode("utf-8")
+        req = urllib.request.Request(
+            url,
+            data=req_data,
+            headers={
+                "Authorization": f"Zoho-oauthtoken {za.access_token}",
+                "Content-Type": "application/json",
+            },
+            method="PUT",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                resp_data = json.loads(resp.read().decode("utf-8"))
+                outcomes.append({"email": za.zoho_email, "status": "success", "response": resp_data})
+        except urllib.error.HTTPError as he:
+            err_body = he.read().decode("utf-8", errors="replace")
+            # Try fallback: addsendmaildetails mode
+            fb_payload = {
+                "mode": "addsendmaildetails",
+                "sendMailDetails": {
+                    "fromAddress": za.zoho_email,
+                    "displayName": target_name,
+                },
+            }
+            fb_req = urllib.request.Request(
+                url,
+                data=json.dumps(fb_payload).encode("utf-8"),
+                headers={
+                    "Authorization": f"Zoho-oauthtoken {za.access_token}",
+                    "Content-Type": "application/json",
+                },
+                method="PUT",
+            )
+            try:
+                with urllib.request.urlopen(fb_req, timeout=15) as fb_resp:
+                    fb_data = json.loads(fb_resp.read().decode("utf-8"))
+                    outcomes.append({"email": za.zoho_email, "status": "success_fallback", "response": fb_data})
+            except Exception as e2:
+                outcomes.append({"email": za.zoho_email, "status": "error", "code": he.code, "body": err_body[:200]})
+        except Exception as e:
+            outcomes.append({"email": za.zoho_email, "status": "error", "error": str(e)})
+
+    await db.commit()
+    return {"total": len(rows), "outcomes": outcomes}
+
+
 @router.get("/oauth/zoho/authorize")
 async def zoho_authorize(
     request: Request,
