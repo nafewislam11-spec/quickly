@@ -1303,8 +1303,6 @@ def _send_via_zoho(
         "mailFormat": "html" if is_html else "plaintext",
         "askReceipt": "no",
     }
-    if from_name:
-        payload["displayName"] = from_name
     clean_in_reply_to = ""
     if reply_to_msg_id:
         clean_in_reply_to = reply_to_msg_id.strip("<>")
@@ -1399,7 +1397,7 @@ def _send_via_zoho(
             )
         if status_code == 400:
             return SendFailure(
-                error_type="bounce",
+                error_type="api_error",
                 message=f"Zoho rejected message (400): {err_body[:300]}",
             )
         if status_code == 404:
