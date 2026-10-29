@@ -52,6 +52,7 @@ export default function CampaignDetail() {
   const queueRef = useRef(null);
   const [pastExpanded, setPastExpanded] = useState(false);
   const [recalcInProgress, setRecalcInProgress] = useState(false);
+  const [queueDisplayLimit, setQueueDisplayLimit] = useState(150);
   const [error, setError] = useState(null);
   const [loading, setLoading] = useState(() => !apiCache.get(`/campaigns/${id}`));
   const [activeTab, setActiveTab] = useState(() => {
@@ -209,11 +210,15 @@ export default function CampaignDetail() {
                 </tr>
               </thead>
               <tbody>
-                {Object.keys(upcoming.reduce((acc,q)=>{const d=formatDateKey(q.scheduled_date, tz); (acc[d]=acc[d]||[]).push(q); return acc;},{})).sort()
-                  .flatMap(d => upcoming
-                    .filter(q=>formatDateKey(q.scheduled_date, tz)===d)
-                    .sort((a,b)=>(a.scheduled_date||'').localeCompare(b.scheduled_date||'')||a.position_in_day-b.position_in_day)
-                    .map((q,i)=>{
+                {(() => {
+                  const sliced = upcoming.slice(0, queueDisplayLimit);
+                  const groups = {};
+                  sliced.forEach(q => {
+                    const d = formatDateKey(q.scheduled_date, tz);
+                    (groups[d] = groups[d] || []).push(q);
+                  });
+                  return Object.keys(groups).sort().flatMap(d =>
+                    groups[d].map((q, i) => {
                       const isPast = d < today;
                       const t = q.scheduled_date?.includes('T') ? formatTime(q.scheduled_date) : estimatedTime(q.position_in_day);
                       const localT = (userLocalTz && campaign?.timezone && userLocalTz !== campaign.timezone && q.scheduled_date?.includes('T'))
@@ -245,9 +250,22 @@ export default function CampaignDetail() {
                           <td className="px-3 py-1.5">Seq {q.sequence_index+1}</td>
                         </tr>
                       );
-                    }))}
+                    })
+                  );
+                })()}
               </tbody>
             </table>
+            {upcoming.length > queueDisplayLimit && (
+              <div className="py-3 text-center">
+                <button
+                  type="button"
+                  onClick={() => setQueueDisplayLimit(p => p + 200)}
+                  className="px-4 py-2 text-xs font-semibold text-teal-700 bg-teal-50 hover:bg-teal-100 rounded-md border border-teal-200 transition-colors shadow-sm"
+                >
+                  Show more slots ({upcoming.length - queueDisplayLimit} more)
+                </button>
+              </div>
+            )}
           </>
         )}
         {!upcoming.length && !sent.length && (
