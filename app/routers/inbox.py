@@ -618,6 +618,10 @@ async def delete_inbox(inbox_id: int, request: Request, db: AsyncSession = Depen
     inbox = result.scalar_one_or_none()
     if not inbox:
         raise HTTPException(404, "Inbox not found")
+    # Delete queue slots referencing this inbox
+    await db.execute(
+        QueueSlot.__table__.delete().where(QueueSlot.inbox_id == inbox_id)
+    )
     # Remove campaign assignments referencing this inbox
     await db.execute(
         CampaignInbox.__table__.delete().where(CampaignInbox.inbox_id == inbox_id)
