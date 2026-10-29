@@ -1877,6 +1877,36 @@ async def list_queue(campaign_id: int, db: AsyncSession = Depends(get_db)):
     ]
 
 
+@router.post("/{campaign_id}/recalculate-queue")
+async def recalculate_campaign_queue(campaign_id: int, db: AsyncSession = Depends(get_db)):
+    """Recalculate queue slots for a campaign.
+
+    Wipes outdated queue slots and recalculates fresh slots for all active campaigns
+    using current inbox capacities, warm-up limits, and schedules.
+    """
+    campaign_res = await db.execute(select(Campaign).where(Campaign.id == campaign_id))
+    campaign = campaign_res.scalar_one_or_none()
+    if not campaign:
+        raise HTTPException(status_code=404, detail="Campaign not found")
+
+    from app.routers.schedule import recalculate_all_campaigns
+
+    result = await recalculate_all_campaigns(db)
+    await db.commit()
+
+    slots_res = await db.execute(
+        select(func.count(QueueSlot.id))
+        .join(CampaignLead, QueueSlot.campaign_lead_id == CampaignLead.id)
+        .where(CampaignLead.campaign_id == campaign_id)
+    )
+    campaign_slots = slots_res.scalar() or 0
+
+    return {
+        "ok": True,
+        "slots": campaign_slots,
+        "total_slots": result.get("total_slots", 0),
+        "campaigns_processed": result.get("campaigns_processed", 0),
+    }
 
 
 @router.get("/{campaign_id}/analytics/steps")

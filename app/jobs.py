@@ -1146,6 +1146,23 @@ async def run_send_job():
 # Per-slot job: fired by APScheduler at the slot's exact scheduled_date
 # ---------------------------------------------------------------------------
 
+import time as _stdlib_time
+
+_daily_limit_notified_dates: set[tuple[int, date]] = set()
+_rate_limit_notified_times: dict[int, float] = {}
+_last_auto_recalc_time: float = 0.0
+
+
+def _trigger_background_recalculate() -> None:
+    """Trigger a debounced global recalculation to push quota-blocked slots forward."""
+    global _last_auto_recalc_time
+    now_ts = _stdlib_time.time()
+    if now_ts - _last_auto_recalc_time > 30.0:
+        _last_auto_recalc_time = now_ts
+        from app.routers.schedule import run_recalculate_all_in_new_session
+        asyncio.create_task(run_recalculate_all_in_new_session())
+
+
 async def send_slot_job(slot_id: int) -> None:
     """Send a single queue slot identified by *slot_id*.
 
@@ -1222,11 +1239,17 @@ async def send_slot_job(slot_id: int) -> None:
                 "send_slot_job: daily limit hit for inbox %s (sent=%d cap=%d), skipping slot %d",
                 inbox.email, already_sent, max_per_day, slot_id,
             )
-            await fire_webhook_event(
-                session, "daily_limit",
-                {"inbox_id": inbox.id, "inbox_email": inbox.email, "date": str(today)},
-            )
-            await session.commit()
+            if (inbox.id, today) not in _daily_limit_notified_dates:
+                _daily_limit_notified_dates.add((inbox.id, today))
+                _daily_limit_notified_dates.difference_update(
+                    {k for k in _daily_limit_notified_dates if k[1] < today}
+                )
+                await fire_webhook_event(
+                    session, "daily_limit",
+                    {"inbox_id": inbox.id, "inbox_email": inbox.email, "date": str(today)},
+                )
+                await session.commit()
+            _trigger_background_recalculate()
             return
 
         # ── Rate-limit check ─────────────────────────────────────────────
@@ -1246,16 +1269,20 @@ async def send_slot_job(slot_id: int) -> None:
                     "last sent %s ago (need %s), skipping slot %d",
                     inbox.email, delta, required, slot_id,
                 )
-                await fire_webhook_event(
-                    session, "rate_limit",
-                    {
-                        "inbox_id": inbox.id, "inbox_email": inbox.email,
-                        "last_sent": last_sent_time.isoformat(),
-                        "now": now.isoformat(),
-                        "wait_minutes": inbox.wait_minutes_between,
-                    },
-                )
-                await session.commit()
+                now_ts = _stdlib_time.time()
+                last_notified = _rate_limit_notified_times.get(inbox.id, 0.0)
+                if now_ts - last_notified > 600.0:  # notify at most once per 10 minutes
+                    _rate_limit_notified_times[inbox.id] = now_ts
+                    await fire_webhook_event(
+                        session, "rate_limit",
+                        {
+                            "inbox_id": inbox.id, "inbox_email": inbox.email,
+                            "last_sent": last_sent_time.isoformat(),
+                            "now": now.isoformat(),
+                            "wait_minutes": inbox.wait_minutes_between,
+                        },
+                    )
+                    await session.commit()
                 return
 
         # ── stop_on_reply check ──────────────────────────────────────────
@@ -1953,11 +1980,12 @@ async def run_slot_scan_job() -> None:
     same slot inside their overlapping 60-second windows.
     """
     now = time_provider.now()
+    today = now.date()
     window_end = now + timedelta(seconds=60)
 
     async with AsyncSessionLocal() as session:
         due_res = await session.execute(
-            select(QueueSlot.id, QueueSlot.scheduled_date)
+            select(QueueSlot.id, QueueSlot.scheduled_date, QueueSlot.inbox_id)
             .where(QueueSlot.scheduled_date <= window_end)
             .order_by(QueueSlot.scheduled_date, QueueSlot.position_in_day)
         )
@@ -1967,8 +1995,10 @@ async def run_slot_scan_job() -> None:
         return
 
     dispatched = 0
-    for slot_id, scheduled_date in rows:
+    for slot_id, scheduled_date, inbox_id in rows:
         if slot_id in _pending_slot_ids:
+            continue
+        if (inbox_id, today) in _daily_limit_notified_dates:
             continue
         delay = (scheduled_date - now).total_seconds()
         _pending_slot_ids.add(slot_id)
