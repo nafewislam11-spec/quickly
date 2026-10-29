@@ -28,6 +28,8 @@ callback_router = APIRouter(tags=["zoho-oauth"])
 ZOHO_SCOPES = [
     "ZohoMail.messages.ALL",
     "ZohoMail.accounts.READ",
+    "ZohoMail.folders.READ",
+    "ZohoMail.folders.ALL",
     "offline_access",
 ]
 
@@ -356,6 +358,12 @@ async def zoho_callback(
 
     await db.commit()
     log.info("Zoho Mail OAuth connected: %s (inbox_id=%s, account_id=%s)", user_email, inbox.id, zoho_account_id)
+
+    try:
+        from app.unibox import queue_sync_for_inbox
+        background_tasks.add_task(queue_sync_for_inbox, inbox.id, "oauth-connect")
+    except Exception as _e:
+        log.warning("Could not queue initial sync for zoho inbox %s: %s", inbox.id, _e)
 
     base = f"{proto}://{host}".rstrip("/") if host else settings.base_url.rstrip("/")
     if source == "connect_url":
