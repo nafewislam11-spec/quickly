@@ -2030,7 +2030,7 @@ async def _sync_inbox_zoho(db: AsyncSession, inbox: Inbox, reason: str = "") -> 
 
     mail_url = _get_mail_api_url(region)
 
-    def _fetch_zoho_url(url: str, retried: bool = False) -> dict | None:
+    def _fetch_zoho_url(url: str, retried: bool = False, is_optional: bool = False) -> dict | None:
         auth_headers = [f"Zoho-oauthtoken {za.access_token}", f"Bearer {za.access_token}"]
         for auth_h in auth_headers:
             req = urllib.request.Request(
@@ -2041,14 +2041,19 @@ async def _sync_inbox_zoho(db: AsyncSession, inbox: Inbox, reason: str = "") -> 
                 with urllib.request.urlopen(req, timeout=20) as resp:
                     return _json.loads(resp.read().decode())
             except urllib.error.HTTPError as e:
-                if e.code == 401 and not retried:
+                if e.code == 401 and not retried and not is_optional:
                     new_tok = refresh_access_token(za, client_id, client_secret, region)
                     if new_tok:
                         za.access_token = new_tok
-                        return _fetch_zoho_url(url, retried=True)
-                log.warning("Zoho API HTTPError %s on %s", e.code, url)
+                        return _fetch_zoho_url(url, retried=True, is_optional=is_optional)
+                if not is_optional or e.code != 401:
+                    log.warning("Zoho API HTTPError %s on %s", e.code, url)
+                # Avoid redundant second request on 400 or unrecoverable client error
+                if e.code in (400, 401, 403, 404):
+                    break
             except Exception as e:
                 log.warning("Zoho API error on %s: %s", url, e)
+                break
         return None
 
     async def _register_zoho_lead_reply(
@@ -2153,7 +2158,7 @@ async def _sync_inbox_zoho(db: AsyncSession, inbox: Inbox, reason: str = "") -> 
 
     # 1. Discover Inbox folder if token has ZohoMail.folders.READ
     folders_url = f"{mail_url}/api/accounts/{account_id}/folders"
-    f_payload = await asyncio.to_thread(_fetch_zoho_url, folders_url)
+    f_payload = await asyncio.to_thread(_fetch_zoho_url, folders_url, False, True)
     inbox_folder_id = ""
     if f_payload and isinstance(f_payload.get("data"), list):
         for f in f_payload["data"]:
@@ -2166,14 +2171,14 @@ async def _sync_inbox_zoho(db: AsyncSession, inbox: Inbox, reason: str = "") -> 
     v_called = False
     if inbox_folder_id:
         v_called = True
-        view_url = f"{mail_url}/api/accounts/{account_id}/messages/view?folderId={inbox_folder_id}&limit=50"
+        view_url = f"{mail_url}/api/accounts/{account_id}/messages/view?folderId={inbox_folder_id}&start=1&limit=50"
         v_payload = await asyncio.to_thread(_fetch_zoho_url, view_url)
         if v_payload and isinstance(v_payload.get("data"), list):
             for m in v_payload["data"]:
                 _add_msg(m)
 
     # 2. Search `searchKey=newMails` (Zoho standard incoming search; works with ZohoMail.messages.ALL without folder scopes)
-    search_new_url = f"{mail_url}/api/accounts/{account_id}/messages/search?searchKey=newMails&limit=50&includeto=true"
+    search_new_url = f"{mail_url}/api/accounts/{account_id}/messages/search?searchKey=newMails&start=1&limit=50&includeto=true"
     s_payload = await asyncio.to_thread(_fetch_zoho_url, search_new_url)
     if s_payload and isinstance(s_payload.get("data"), list):
         for m in s_payload["data"]:
@@ -2181,10 +2186,10 @@ async def _sync_inbox_zoho(db: AsyncSession, inbox: Inbox, reason: str = "") -> 
             if not inbox_folder_id and m.get("folderId"):
                 inbox_folder_id = str(m.get("folderId"))
 
-    # 3. Search messages addressed to this inbox `searchKey=to={inbox.email}`
+    # 3. Search messages addressed to this inbox `searchKey=to:{inbox.email}`
     if inbox.email:
         clean_own = inbox.email.strip().lower()
-        to_q = urllib.parse.urlencode({"searchKey": f"to={clean_own}", "limit": 50, "includeto": "true"})
+        to_q = urllib.parse.urlencode({"searchKey": f"to:{clean_own}", "start": 1, "limit": 50, "includeto": "true"})
         to_url = f"{mail_url}/api/accounts/{account_id}/messages/search?{to_q}"
         t_payload = await asyncio.to_thread(_fetch_zoho_url, to_url)
         if t_payload and isinstance(t_payload.get("data"), list):
@@ -2195,7 +2200,7 @@ async def _sync_inbox_zoho(db: AsyncSession, inbox: Inbox, reason: str = "") -> 
 
     # If inbox_folder_id was discovered from search results and messages/view was not called yet, call messages/view now
     if inbox_folder_id and not v_called:
-        view_url = f"{mail_url}/api/accounts/{account_id}/messages/view?folderId={inbox_folder_id}&limit=50"
+        view_url = f"{mail_url}/api/accounts/{account_id}/messages/view?folderId={inbox_folder_id}&start=1&limit=50"
         v_payload = await asyncio.to_thread(_fetch_zoho_url, view_url)
         if v_payload and isinstance(v_payload.get("data"), list):
             for m in v_payload["data"]:
@@ -2214,7 +2219,7 @@ async def _sync_inbox_zoho(db: AsyncSession, inbox: Inbox, reason: str = "") -> 
     for clead in contacted_leads[:10]:
         already = any(_extract_email_only(x.get("fromAddress") or x.get("sender") or "") == clead for x in raw_messages)
         if not already:
-            sq = urllib.parse.urlencode({"searchKey": f"sender:{clead}", "limit": 5, "includeto": "true"})
+            sq = urllib.parse.urlencode({"searchKey": f"sender:{clead}", "start": 1, "limit": 10, "includeto": "true"})
             s_url = f"{mail_url}/api/accounts/{account_id}/messages/search?{sq}"
             l_payload = await asyncio.to_thread(_fetch_zoho_url, s_url)
             if l_payload and isinstance(l_payload.get("data"), list):
